@@ -210,6 +210,7 @@ winit = { version = "0.30", default-features = false, features = [
     "wayland",
     "wayland-dlopen",
     "serde",
+    "android-native-activity",
 ] }
 # The audio backend. Its own thread and its own clock, which is the property
 # that matters here: charter rule 18 cares about frame PACING, and a mixer that
