@@ -19,6 +19,11 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "android")]
+use crate as client;
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
 use client::app::{App, Input, Phases, Teleport};
 use client::cache::ContentCache;
 use client::config::{Config, ServerChoice};
@@ -174,6 +179,7 @@ fn crash_entry(message: &str, location: &str, backtrace: &str) -> String {
     )
 }
 
+#[cfg(not(target_os = "android"))]
 fn main() -> std::process::ExitCode {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -215,7 +221,41 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+#[cfg(target_os = "android")]
+/// NativeActivity entry point required by winit's Android backend.
+#[unsafe(no_mangle)]
+fn android_main(app: AndroidApp) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    if let Err(err) = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .try_init()
+    {
+        eprintln!("Tiamat Android logging initialization: {err}");
+    }
+
+    if let Err(err) = run(app) {
+        tracing::error!(error = %err, "Tiamat Android client stopped during startup");
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(())
+}
+
+#[cfg(target_os = "android")]
+fn run(app: AndroidApp) -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(Some(app))
+}
+
+#[cfg(target_os = "android")]
+type PlatformEventLoopApp = Option<AndroidApp>;
+#[cfg(not(target_os = "android"))]
+type PlatformEventLoopApp = ();
+
+fn run_inner(_platform_app: PlatformEventLoopApp) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load_or_default(&config_file())?;
     let bindings = Bindings::load_or_default(&bindings_file())?;
     let data = config.data_dir();
@@ -328,6 +368,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (Some(connection), embedded)
     };
 
+    #[cfg(target_os = "android")]
+    let event_loop = {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        let mut builder = EventLoop::builder();
+        let app = _platform_app.ok_or("AndroidApp missing from android_main")?;
+        builder.with_android_app(app);
+        builder.build()?
+    };
+    #[cfg(not(target_os = "android"))]
     let event_loop = EventLoop::new()?;
     // Poll rather than Wait: this is a game, and a frame is due whether or not
     // an input event arrived.
