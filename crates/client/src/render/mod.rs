@@ -1275,6 +1275,9 @@ pub struct Renderer {
     /// edge. Infinite until told, so a caller that never says is exactly as
     /// it was.
     fog_up: f32,
+    /// The detail radius granted by the server, in chunks.
+    view_horizontal: u8,
+    view_vertical: u8,
     /// How many chunks the last frame actually drew.
     drawn: usize,
     /// How many chunks the last frame drew into the cascades.
@@ -1475,6 +1478,8 @@ impl Renderer {
             fog_curve: FOG_CURVE,
             fog_end: f32::MAX,
             fog_up: f32::MAX,
+            view_horizontal: 32,
+            view_vertical: 32,
             place_fog,
             particles,
             lightning,
@@ -1490,6 +1495,12 @@ impl Renderer {
             entity_figures: 0,
             body_visible: false,
         })
+    }
+
+    /// Sets the detail render radius granted by the server.
+    pub fn set_view_distance(&mut self, horizontal: u8, vertical: u8) {
+        self.view_horizontal = horizontal.max(1);
+        self.view_vertical = vertical.max(1);
     }
 
     /// The device this renderer draws with.
@@ -3198,12 +3209,22 @@ impl Renderer {
         // a corner is inside.
         let half_diagonal = tiamat_core::CHUNK_BLOCKS as f32 * 0.866_025_4;
         let shadow_reach = shadow::CASTER_REACH + half_diagonal;
+        let horizontal_reach =
+            f32::from(self.view_horizontal) * tiamat_core::CHUNK_BLOCKS as f32 + half_diagonal;
+        let vertical_reach =
+            f32::from(self.view_vertical) * tiamat_core::CHUNK_BLOCKS as f32 + half_diagonal;
         for (pos, mesh) in &self.chunks {
             let offset = camera.position.chunk_offset(*pos);
+            let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+            if centre.x.abs() > horizontal_reach
+                || centre.z.abs() > horizontal_reach
+                || centre.y.abs() > vertical_reach
+            {
+                continue;
+            }
             let seen = frustum.contains_chunk(offset);
             let mut casts = [false; shadow::CASCADES];
             if !cascades.is_empty() {
-                let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
                 if centre.length_squared() <= shadow_reach * shadow_reach {
                     for (index, cascade) in cascades.iter().enumerate() {
                         casts[index] = cascade.contains_chunk(offset);
