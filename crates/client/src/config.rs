@@ -728,6 +728,30 @@ impl Config {
         resolve_install_path(&self.mods_path)
     }
 
+    /// Resolves Android's relative paths against its private application data
+    /// directory. Android's process working directory is not a writable,
+    /// persistent location and must never be used for saves or installed mods.
+    ///
+    /// An explicitly configured data path is retained; relative overrides are
+    /// interpreted under the app-private directory.
+    pub fn resolve_android_paths(&mut self, app_data_dir: &Path) {
+        if let Some(path) = self.data_path.as_mut() {
+            if path.is_relative() {
+                *path = app_data_dir.join(&*path);
+            }
+        } else {
+            self.data_path = Some(app_data_dir.to_path_buf());
+        }
+
+        let data_dir = self.data_dir();
+        if self.world_path.is_relative() {
+            self.world_path = data_dir.join(&self.world_path);
+        }
+        if self.mods_path.is_relative() {
+            self.mods_path = data_dir.join(&self.mods_path);
+        }
+    }
+
     /// The directory holding the identity key and the content cache.
     #[must_use]
     pub fn data_dir(&self) -> PathBuf {
@@ -1301,6 +1325,34 @@ mod tests {
             "a hand-set `data_path` was rewritten"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn android_defaults_keep_all_writable_paths_in_app_private_storage() {
+        let app_data = Path::new("/data/user/0/dev.tiamat/files");
+        let mut config = Config::default();
+
+        config.resolve_android_paths(app_data);
+
+        assert_eq!(config.data_dir(), app_data);
+        assert_eq!(config.world_path, app_data.join("singleplayer"));
+        assert_eq!(config.mods_path, app_data.join("game"));
+    }
+
+    #[test]
+    fn android_resolves_relative_overrides_but_preserves_absolute_paths() {
+        let app_data = Path::new("/data/user/0/dev.tiamat/files");
+        let mut config = Config::default();
+        config.data_path = Some(PathBuf::from("custom-data"));
+        config.world_path = PathBuf::from("/mnt/shared/world");
+        config.mods_path = PathBuf::from("custom-mods");
+
+        config.resolve_android_paths(app_data);
+
+        let data = app_data.join("custom-data");
+        assert_eq!(config.data_dir(), data);
+        assert_eq!(config.world_path, Path::new("/mnt/shared/world"));
+        assert_eq!(config.mods_path, data.join("custom-mods"));
     }
 
     #[test]
