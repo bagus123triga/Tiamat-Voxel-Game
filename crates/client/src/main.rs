@@ -90,13 +90,19 @@ const BINDINGS_FILE: &str = "bindings.toml";
 /// `client.toml`: in the per-user data directory for an installed game, so an
 /// update does not reset it; beside the executable or in the working directory
 /// for a working copy (see [`client::config::settings_file`]).
-fn config_file() -> std::path::PathBuf {
-    client::config::settings_file(CONFIG_FILE)
+fn config_file(android_data_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    android_data_dir.map_or_else(
+        || client::config::settings_file(CONFIG_FILE),
+        |directory| directory.join(CONFIG_FILE),
+    )
 }
 
-/// `bindings.toml`, kept the same way as [`config_file`].
-fn bindings_file() -> std::path::PathBuf {
-    client::config::settings_file(BINDINGS_FILE)
+/// `bindings.toml`, kept beside the config in the platform data directory.
+fn bindings_file(android_data_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    android_data_dir.map_or_else(
+        || client::config::settings_file(BINDINGS_FILE),
+        |directory| directory.join(BINDINGS_FILE),
+    )
 }
 
 /// Starting window size.
@@ -256,8 +262,24 @@ type PlatformEventLoopApp = Option<AndroidApp>;
 type PlatformEventLoopApp = ();
 
 fn run_inner(_platform_app: PlatformEventLoopApp) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_or_default(&config_file())?;
-    let bindings = Bindings::load_or_default(&bindings_file())?;
+    #[cfg(target_os = "android")]
+    let android_data_dir = Some(
+        _platform_app
+            .as_ref()
+            .and_then(AndroidApp::internal_data_path)
+            .ok_or("Android did not provide an application-private data directory")?,
+    );
+    #[cfg(not(target_os = "android"))]
+    let android_data_dir: Option<std::path::PathBuf> = None;
+
+    let config_path = config_file(android_data_dir.as_deref());
+    let bindings_path = bindings_file(android_data_dir.as_deref());
+    let mut config = Config::load_or_default(&config_path)?;
+    #[cfg(target_os = "android")]
+    if let Some(directory) = android_data_dir.as_deref() {
+        config.resolve_android_paths(directory);
+    }
+    let bindings = Bindings::load_or_default(&bindings_path)?;
     let data = config.data_dir();
     // Carried across once, for a player who last ran this when it was called
     // Tiamot: their identity key, worlds and trust store live in there.
@@ -385,6 +407,8 @@ fn run_inner(_platform_app: PlatformEventLoopApp) -> Result<(), Box<dyn std::err
     let mut client = Client {
         playing: None,
         config,
+        config_path,
+        bindings_path,
         library,
         catalogue,
         identity_path: data.join("identity.key"),
@@ -437,6 +461,10 @@ struct PendingConnect {
 /// The window, the surface, and everything drawn into it.
 struct Surface {
     window: Arc<Window>,
+    /// Settings paths are retained with the window because its draw functions
+    /// persist changes without reaching back into the event-loop owner.
+    config_path: std::path::PathBuf,
+    bindings_path: std::path::PathBuf,
     surface: wgpu::Surface<'static>,
     /// **Kept here rather than reached through the renderer**, because the
     /// surface has to be configured and the front screen drawn before there is
@@ -690,6 +718,8 @@ struct Parked {
 
 struct Client {
     config: Config,
+    config_path: std::path::PathBuf,
+    bindings_path: std::path::PathBuf,
     /// The player's worlds and servers, as the front screen shows them.
     library: client::launcher::Library,
     /// Every installed mod, and which are ticked.
@@ -1212,6 +1242,8 @@ impl Client {
 
         Ok(Surface {
             window,
+            config_path: self.config_path.clone(),
+            bindings_path: self.bindings_path.clone(),
             surface,
             gpu,
             stage,
@@ -2844,7 +2876,7 @@ fn draw_front(
     // "close" on a front screen — a player presses Play, and a setting that
     // only reached the file on the way out would be lost by the one route
     // everybody takes.
-    if dirty && let Err(err) = config.save(&config_file()) {
+    if dirty && let Err(err) = config.save(&surface.config_path) {
         tracing::warn!(%err, "could not save the settings");
     }
     surface
@@ -3019,7 +3051,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
     if app.take_volumes_dirty() {
         let mut config = app.config().clone();
         config.volumes = app.mixer_mut().volumes().clone();
-        if let Err(err) = config.save(&config_file()) {
+        if let Err(err) = config.save(&surface.config_path) {
             tracing::warn!(%err, "could not save the volume settings");
         }
     }
@@ -3030,7 +3062,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
     // failed write is reported rather than retried because the likeliest cause
     // is a read-only directory that will not fix itself.
     if app.take_bindings_dirty()
-        && let Err(err) = app.bindings().save(&bindings_file())
+        && let Err(err) = app.bindings().save(&surface.bindings_path)
     {
         tracing::warn!(%err, "could not save the key bindings");
     }
