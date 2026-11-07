@@ -4268,6 +4268,7 @@ impl App {
             self.renderer.remove_chunk(&self.drawn_at(pos));
         }
         self.horizon.beyond.clear();
+        self.horizon.built.clear();
         self.store.clear();
         self.entities.clear();
         self.particles.clear();
@@ -5105,6 +5106,7 @@ impl App {
 
             Event::ChunkUnload(pos) => {
                 self.horizon.beyond.remove(&pos);
+                self.horizon.built.remove(&pos);
                 self.evicted_meshes.remove(&pos);
                 if self.store.remove(pos) {
                     // The mesh has to go with the data. A renderer holding
@@ -5353,7 +5355,7 @@ impl App {
     /// see [`crate::mesher::OpenSky`].
     fn upload_chunk(&mut self, at: ChunkPos, mut mesh: mesher::Mesh) {
         mesh.open_sky = self.store.open_sky(at);
-        self.renderer.set_chunk(self.drawn_at(at), &mesh);
+        self.renderer.set_detail_chunk(self.drawn_at(at), &mesh);
     }
 
     /// The overlay's horizon line.
@@ -5457,6 +5459,8 @@ impl App {
                 // walks it every frame.
                 if summary.is_empty() || self.store.horizon_is_buried(*pos) {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
+                    self.horizon.built.remove(pos);
+                    self.horizon.beyond.remove(pos);
                 } else if self.past_the_fog(*pos) {
                     // **Past the fog's reach nothing can be seen**, so
                     // nothing is built: the fog is total there, in every
@@ -5466,6 +5470,7 @@ impl App {
                     // Held, and judged again when the reach grows or the
                     // camera comes nearer (`rejudge_horizon`).
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
+                    self.horizon.built.remove(pos);
                     self.horizon.beyond.insert(*pos);
                 } else {
                     let width = summary.width() as usize;
@@ -5494,7 +5499,13 @@ impl App {
                         self.store.fluid_at(at).fluid() != tiamat_core::fluid::FluidId::NONE
                     };
                     let mesh = mesher::mesh_summary(summary, &fluids, above);
-                    self.renderer.set_chunk(self.drawn_at(*pos), &mesh);
+                    self.renderer.set_horizon_chunk(self.drawn_at(*pos), &mesh);
+                    self.horizon.beyond.remove(pos);
+                    if mesh.is_empty() {
+                        self.horizon.built.remove(pos);
+                    } else {
+                        self.horizon.built.insert(*pos);
+                    }
                 }
                 built += 1;
             }
@@ -5520,17 +5531,39 @@ impl App {
             return;
         };
         let centre = self.camera_chunk();
-        let grown =
-            reach.0 > self.horizon.judged.0 * 1.02 || reach.1 > self.horizon.judged.1 * 1.02;
-        if centre == self.horizon.centre && !grown {
+        // Rejudge on camera-chunk movement and on either growth OR shrinkage
+        // of the fog. Keeping invisible, already-built summaries was a source
+        // of unbounded renderer work after long walks.
+        let changed = (reach.0 - self.horizon.judged.0).abs()
+            > self.horizon.judged.0.max(1.0) * 0.02
+            || (reach.1 - self.horizon.judged.1).abs()
+                > self.horizon.judged.1.max(1.0) * 0.02;
+        if centre == self.horizon.centre && !changed {
             return;
         }
         self.horizon.centre = centre;
         self.horizon.judged = reach;
+
+        // Retire summaries already built but now wholly behind the fog. Their
+        // source data stays in the store, ready to rebuild if the player comes
+        // back or the fog reach grows.
+        let built = std::mem::take(&mut self.horizon.built);
+        for pos in built {
+            if self.store.summary(pos).is_none() {
+                continue;
+            }
+            if self.past_the_fog(pos) {
+                self.renderer.remove_chunk(&self.drawn_at(pos));
+                self.horizon.beyond.insert(pos);
+            } else {
+                self.horizon.built.insert(pos);
+            }
+        }
+
+        // Bring held-back summaries within the fog's reach back to the queue.
         let held = std::mem::take(&mut self.horizon.beyond);
         let mut within = Vec::new();
         for pos in held {
-            // A summary the store has since let go is nobody's to judge.
             if self.store.summary(pos).is_none() {
                 continue;
             }
@@ -6132,6 +6165,8 @@ impl App {
         // colours fresh every frame, so nothing has to be remeshed; the instance
         // simply carries different numbers next frame.
         let pos = chunk.pos();
+        self.horizon.built.remove(&pos);
+        self.horizon.beyond.remove(&pos);
         self.store.set_tint(pos, tint);
         self.renderer.set_chunk_tint(pos, tint);
         // The place's fog, by the same rule: the latest chunk of a column speaks
@@ -7848,6 +7883,8 @@ struct HorizonHold {
     /// Wholly past the fog's reach, held until the reach grows or the camera
     /// comes nearer.
     beyond: std::collections::BTreeSet<ChunkPos>,
+    /// Summary meshes currently resident in the renderer, in store coordinates.
+    built: std::collections::BTreeSet<ChunkPos>,
     /// The fog's reach in clear air, sideways and up, in blocks: what the
     /// horizon is judged against, kept from the last frame's fog so a dive
     /// under water does not throw the horizon away and build it again.
@@ -7862,6 +7899,7 @@ impl Default for HorizonHold {
     fn default() -> Self {
         Self {
             beyond: std::collections::BTreeSet::new(),
+            built: std::collections::BTreeSet::new(),
             reach: None,
             // Nothing yet: the first real reach counts as having grown, so
             // the first judgement is made against it.

@@ -1128,7 +1128,11 @@ pub struct Renderer {
     /// independently.
     tints: TintTable,
     chunks: BTreeMap<ChunkPos, ChunkMesh>,
-    /// Drawn chunk positions whose GPU meshes were evicted beyond the detail radius.
+    /// Full-resolution chunks, including model-only chunks.
+    detail_chunks: std::collections::BTreeSet<ChunkPos>,
+    /// Downsampled horizon chunks, retired by the app's fog-reach judgement.
+    horizon_chunks: std::collections::BTreeSet<ChunkPos>,
+    /// Drawn chunk positions whose detail meshes were evicted beyond the view radius.
     evicted: Vec<ChunkPos>,
     /// The model blocks of each resident chunk, from the mesh that chunk was
     /// last built with (Contract §8.6 "Found at remesh"). **Its own map rather
@@ -1280,6 +1284,8 @@ pub struct Renderer {
     /// The detail radius granted by the server, in chunks.
     view_horizontal: u8,
     view_vertical: u8,
+    horizon_horizontal: u8,
+    horizon_vertical: u8,
     /// How many chunks the last frame actually drew.
     drawn: usize,
     /// How many chunks the last frame drew into the cascades.
@@ -1427,6 +1433,8 @@ impl Renderer {
             tints,
             biomes: ColumnTints::default(),
             chunks: BTreeMap::new(),
+            detail_chunks: std::collections::BTreeSet::new(),
+            horizon_chunks: std::collections::BTreeSet::new(),
             evicted: Vec::new(),
             model_blocks: BTreeMap::new(),
             flickering: Flickering::default(),
@@ -1483,6 +1491,8 @@ impl Renderer {
             fog_up: f32::MAX,
             view_horizontal: 32,
             view_vertical: 32,
+            horizon_horizontal: 32,
+            horizon_vertical: 16,
             place_fog,
             particles,
             lightning,
@@ -1504,6 +1514,11 @@ impl Renderer {
     pub fn set_view_distance(&mut self, horizontal: u8, vertical: u8) {
         self.view_horizontal = horizontal.max(1);
         self.view_vertical = vertical.max(1);
+        let horizon = tiamat_core::lod::horizon_for(
+            tiamat_core::interest::ViewDistance::clamped(horizontal, vertical),
+        );
+        self.horizon_horizontal = horizon.horizontal;
+        self.horizon_vertical = horizon.vertical;
     }
 
     /// The device this renderer draws with.
@@ -2479,6 +2494,24 @@ impl Renderer {
     /// An empty mesh **removes** the chunk rather than storing a zero-length
     /// buffer: a chunk that was solid and has been dug out entirely must stop
     /// being drawn, and a zero-index draw call is a per-frame cost for nothing.
+    /// Stores a full-detail chunk, which is evicted when it leaves the view radius.
+    pub fn set_detail_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
+        self.horizon_chunks.remove(&pos);
+        self.detail_chunks.insert(pos);
+        self.set_chunk(pos, mesh);
+    }
+
+    /// Stores a downsampled horizon chunk, managed against fog reach instead.
+    pub fn set_horizon_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
+        self.detail_chunks.remove(&pos);
+        if mesh.is_empty() {
+            self.horizon_chunks.remove(&pos);
+        } else {
+            self.horizon_chunks.insert(pos);
+        }
+        self.set_chunk(pos, mesh);
+    }
+
     pub fn set_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
         self.set_block_lists(pos, &mesh.models, &mesh.flickers);
         if mesh.is_empty() {
@@ -2650,6 +2683,8 @@ impl Renderer {
     pub fn remove_chunk(&mut self, pos: &ChunkPos) {
         self.model_blocks.remove(pos);
         self.flickering.blocks.remove(pos);
+        self.detail_chunks.remove(pos);
+        self.horizon_chunks.remove(pos);
         self.evicted.retain(|evicted| evicted != pos);
         self.drop_mesh(pos);
     }
@@ -2680,6 +2715,8 @@ impl Renderer {
     pub fn clear(&mut self) {
         self.model_blocks.clear();
         self.flickering.blocks.clear();
+        self.detail_chunks.clear();
+        self.horizon_chunks.clear();
         self.evicted.clear();
         for (_, mesh) in std::mem::take(&mut self.chunks) {
             self.pool.give_mesh(mesh);
@@ -3213,9 +3250,13 @@ impl Renderer {
         // A conservative upper bound for chunks that can intersect the
         // axis-aligned detail box. Do not reserve for every chunk ever visited.
         let horizontal_diameter =
-            usize::from(self.view_horizontal).saturating_mul(2).saturating_add(3);
+            usize::from(self.view_horizontal.max(self.horizon_horizontal))
+                .saturating_mul(2)
+                .saturating_add(3);
         let vertical_diameter =
-            usize::from(self.view_vertical).saturating_mul(2).saturating_add(3);
+            usize::from(self.view_vertical.max(self.horizon_vertical))
+                .saturating_mul(2)
+                .saturating_add(3);
         let active_capacity = horizontal_diameter
             .saturating_mul(horizontal_diameter)
             .saturating_mul(vertical_diameter)
@@ -3223,7 +3264,6 @@ impl Renderer {
         if instances.capacity() < active_capacity {
             instances.reserve(active_capacity.saturating_sub(instances.len()));
         }
-        let mut evicted = Vec::new();
         // A chunk whose centre is outside this radius cannot intersect any
         // cascade, so the three frustum tests below cannot be true for it.
         // The half-diagonal covers a chunk whose centre is just outside while
@@ -3234,14 +3274,27 @@ impl Renderer {
             f32::from(self.view_horizontal) * tiamat_core::CHUNK_BLOCKS as f32 + half_diagonal;
         let vertical_reach =
             f32::from(self.view_vertical) * tiamat_core::CHUNK_BLOCKS as f32 + half_diagonal;
+        // Include model-only detail chunks: they have no terrain mesh in
+        // `chunks`, but their figures still cost CPU and GPU work each frame.
+        let evicted: Vec<_> = self
+            .detail_chunks
+            .iter()
+            .copied()
+            .filter(|pos| {
+                let offset = camera.position.chunk_offset(*pos);
+                let centre =
+                    offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+                centre.x.abs() > horizontal_reach
+                    || centre.z.abs() > horizontal_reach
+                    || centre.y.abs() > vertical_reach
+            })
+            .collect();
+        let evicted_set: std::collections::BTreeSet<_> = evicted.iter().copied().collect();
+
         for (pos, mesh) in &self.chunks {
             let offset = camera.position.chunk_offset(*pos);
             let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
-            if centre.x.abs() > horizontal_reach
-                || centre.z.abs() > horizontal_reach
-                || centre.y.abs() > vertical_reach
-            {
-                evicted.push(*pos);
+            if evicted_set.contains(pos) {
                 continue;
             }
             let seen = frustum.contains_chunk(offset);
