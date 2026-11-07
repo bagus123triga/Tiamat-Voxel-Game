@@ -278,6 +278,10 @@ fn run_inner(_platform_app: PlatformEventLoopApp) -> Result<(), Box<dyn std::err
     #[cfg(target_os = "android")]
     if let Some(directory) = android_data_dir.as_deref() {
         config.resolve_android_paths(directory);
+        // Public Downloads is the canonical, user-editable Android mod directory.
+        config.mods_path = std::path::PathBuf::from(
+            "/storage/emulated/0/Download/tiamat/mods",
+        );
     }
     let bindings = Bindings::load_or_default(&bindings_path)?;
     let data = config.data_dir();
@@ -553,6 +557,7 @@ struct TouchControls {
     jump_id: Option<u64>,
     dig_id: Option<u64>,
     place_id: Option<u64>,
+    inventory_id: Option<u64>,
 }
 
 impl TouchControls {
@@ -1020,7 +1025,7 @@ impl Client {
                     &mut self.digging,
                     app,
                     touch,
-                    (content.width(), content.height()),
+                    content,
                     egui_winit::pixels_per_point(&surface.egui, window),
                 );
             }
@@ -2094,8 +2099,10 @@ impl Client {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let camera = *app.camera();
+        let (horizontal_view, vertical_view) = app.render_distance();
 
         let phase = std::time::Instant::now();
+        app.renderer().set_view_distance(horizontal_view, vertical_view);
         app.renderer().render(&view, &camera, surface.size);
         phases.world = elapsed_ms(phase);
 
@@ -2149,6 +2156,9 @@ fn release_touch_controls(
         *digging = false;
         app.stop_digging();
     }
+    if controls.inventory_id.is_some() {
+        app.send_action("tiamat_default_ui:inventory", false);
+    }
     controls.clear();
 }
 
@@ -2161,31 +2171,56 @@ fn process_touch_event(
     digging: &mut bool,
     app: &mut App,
     touch: winit::event::Touch,
-    size: (f32, f32),
+    content: egui::Rect,
     pixels_per_point: f32,
 ) {
     use winit::event::TouchPhase;
 
-    const TOUCH_SCALE: f32 = 1.25;
-
     let scale = pixels_per_point.max(0.1);
     let position = (
-        touch.location.x as f32 / scale,
-        touch.location.y as f32 / scale,
+        touch.location.x as f32 / scale - content.min.x,
+        touch.location.y as f32 / scale - content.min.y,
     );
-    let (width, height) = size;
-    let joystick = ((88.0 * TOUCH_SCALE).min(width * 0.22), height - 98.0 * TOUCH_SCALE);
-    let jump = (width - 78.0 * TOUCH_SCALE, height - 164.0 * TOUCH_SCALE);
-    let dig = (width - 78.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
-    let place = (width - 166.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
-    let menu = (width - 54.0 * TOUCH_SCALE, 48.0 * TOUCH_SCALE);
-    let button_radius = 43.0 * TOUCH_SCALE;
+    let width = content.width();
+    let height = content.height();
+    const BUTTON_SCALE: f32 = 0.90;
+    const JOYSTICK_SCALE: f32 = 0.85;
+    let joystick = ((88.0 * JOYSTICK_SCALE).min(width * 0.22), height - 98.0 * JOYSTICK_SCALE);
+    let jump = (width - 78.0 * BUTTON_SCALE, height - 164.0 * BUTTON_SCALE);
+    let dig = (width - 78.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
+    let place = (width - 166.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
+    let inventory = (width - 154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
+    let menu = (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
+    let button_radius = 43.0 * BUTTON_SCALE;
 
     // Touches must not continue moving the player behind a menu, chat box or
     // server dialog. Android does not guarantee a release on focus changes.
     if app.menu_open() || app.chat_open() || !app.dialogs().is_empty() {
         release_touch_controls(controls, held, digging, app);
         return;
+    }
+
+    // The hotbar uses a fixed-height virtual canvas. Match its enlarged Android
+    // presentation so each visible slot remains a reliable touch target.
+    let hud_scale = height / f32::from(tiamat_core::hud::VIRTUAL_HEIGHT);
+    let hotbar_scale = 1.55 / 1.4;
+    if matches!(&touch.phase, TouchPhase::Started) && hud_scale > 0.0 {
+        let virtual_x = (position.0 - width * 0.5) / hud_scale;
+        let from_bottom = (height - position.1) / hud_scale;
+        let slot_size = 72.0 * hotbar_scale;
+        let slot_pitch = 78.0 * hotbar_scale;
+        let hotbar_width = 9.0 * slot_pitch - 6.0 * hotbar_scale;
+        let relative_x = virtual_x + hotbar_width * 0.5;
+        if (24.0 * hotbar_scale..=96.0 * hotbar_scale).contains(&from_bottom)
+            && relative_x >= 0.0
+            && relative_x < hotbar_width
+        {
+            let slot = (relative_x / slot_pitch) as usize;
+            if slot < 9 && relative_x - slot as f32 * slot_pitch <= slot_size {
+                app.select_slot(slot);
+            }
+            return;
+        }
     }
 
     let near = |point: (f32, f32), radius: f32| {
@@ -2196,8 +2231,14 @@ fn process_touch_event(
 
     match touch.phase {
         TouchPhase::Started => {
+            // The official UI mod owns the inventory action and dialog.
+            if near(inventory, button_radius) {
+                controls.inventory_id = Some(touch.id);
+                app.send_action("tiamat_default_ui:inventory", true);
+                return;
+            }
             // A menu target keeps pause/settings reachable without a keyboard.
-            if near(menu, 34.0 * TOUCH_SCALE) {
+            if near(menu, button_radius) {
                 app.set_menu_open(true);
                 release_touch_controls(controls, held, digging, app);
                 return;
@@ -2244,6 +2285,10 @@ fn process_touch_event(
             if controls.place_id == Some(touch.id) {
                 controls.place_id = None;
             }
+            if controls.inventory_id == Some(touch.id) {
+                controls.inventory_id = None;
+                app.send_action("tiamat_default_ui:inventory", false);
+            }
             if controls.joystick_id == Some(touch.id) {
                 controls.joystick_id = None;
                 controls.joystick_offset = (0.0, 0.0);
@@ -2270,7 +2315,7 @@ fn update_touch_joystick(
 ) {
     let dx = position.0 - centre.0;
     let dy = position.1 - centre.1;
-    let radius = 64.0 * 1.25;
+    let radius = 64.0 * 0.85;
     let distance = (dx * dx + dy * dy).sqrt();
     let factor = if distance > radius {
         radius / distance
@@ -2278,7 +2323,7 @@ fn update_touch_joystick(
         1.0
     };
     controls.joystick_offset = (dx * factor, dy * factor);
-    let dead_zone = 13.0 * 1.25;
+    let dead_zone = 13.0 * 0.85;
     held.left = dx < -dead_zone;
     held.right = dx > dead_zone;
     held.forward = dy < -dead_zone;
@@ -2287,14 +2332,21 @@ fn update_touch_joystick(
 
 /// Draws the mobile controls in points, matching the hit regions used above.
 #[cfg(target_os = "android")]
-fn draw_touch_controls(context: &egui::Context, size: (f32, f32), controls: TouchControls) {
-    let (width, height) = size;
-    const TOUCH_SCALE: f32 = 1.25;
-    let joystick = ((88.0 * TOUCH_SCALE).min(width * 0.22), height - 98.0 * TOUCH_SCALE);
-    let jump = (width - 78.0 * TOUCH_SCALE, height - 164.0 * TOUCH_SCALE);
-    let dig = (width - 78.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
-    let place = (width - 166.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
-    let menu = (width - 54.0 * TOUCH_SCALE, 48.0 * TOUCH_SCALE);
+fn draw_touch_controls(context: &egui::Context, content: egui::Rect, controls: TouchControls) {
+    let origin = content.min;
+    let width = content.width();
+    let height = content.height();
+    const BUTTON_SCALE: f32 = 0.90;
+    const JOYSTICK_SCALE: f32 = 0.85;
+    let joystick = egui::pos2(
+        origin.x + (88.0 * JOYSTICK_SCALE).min(width * 0.22),
+        origin.y + height - 98.0 * JOYSTICK_SCALE,
+    );
+    let jump = (width - 78.0 * BUTTON_SCALE, height - 164.0 * BUTTON_SCALE);
+    let dig = (width - 78.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
+    let place = (width - 166.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
+    let inventory = (width - 154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
+    let menu = (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
     let painter = context.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("android-touch-controls"),
@@ -2303,35 +2355,36 @@ fn draw_touch_controls(context: &egui::Context, size: (f32, f32), controls: Touc
     let edge = egui::Color32::from_white_alpha(145);
     let active = egui::Color32::from_rgba_unmultiplied(74, 125, 190, 190);
 
-    let base = egui::pos2(joystick.0, joystick.1);
-    painter.circle_filled(base, 66.0 * TOUCH_SCALE, faint);
-    painter.circle_stroke(base, 66.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
+    let base = joystick;
+    painter.circle_filled(base, 66.0 * JOYSTICK_SCALE, faint);
+    painter.circle_stroke(base, 66.0 * JOYSTICK_SCALE, egui::Stroke::new(2.0 * JOYSTICK_SCALE, edge));
     let knob = egui::pos2(
-        joystick.0 + controls.joystick_offset.0,
-        joystick.1 + controls.joystick_offset.1,
+        joystick.x + controls.joystick_offset.0,
+        joystick.y + controls.joystick_offset.1,
     );
     painter.circle_filled(
         knob,
-        27.0 * TOUCH_SCALE,
+        27.0 * JOYSTICK_SCALE,
         if controls.joystick_id.is_some() { active } else { faint },
     );
-    painter.circle_stroke(knob, 27.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
+    painter.circle_stroke(knob, 27.0 * JOYSTICK_SCALE, egui::Stroke::new(2.0 * JOYSTICK_SCALE, edge));
 
     let button = |point: (f32, f32), label: &str, pressed: bool| {
-        let centre = egui::pos2(point.0, point.1);
-        painter.circle_filled(centre, 36.0 * TOUCH_SCALE, if pressed { active } else { faint });
-        painter.circle_stroke(centre, 36.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
+        let centre = egui::pos2(origin.x + point.0, origin.y + point.1);
+        painter.circle_filled(centre, 36.0 * BUTTON_SCALE, if pressed { active } else { faint });
+        painter.circle_stroke(centre, 36.0 * BUTTON_SCALE, egui::Stroke::new(2.0 * BUTTON_SCALE, edge));
         painter.text(
             centre,
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(15.0 * TOUCH_SCALE),
+            egui::FontId::proportional(15.0 * BUTTON_SCALE),
             egui::Color32::WHITE,
         );
     };
     button(jump, "JUMP", controls.jump_id.is_some());
     button(dig, "DIG", controls.dig_id.is_some());
     button(place, "PLACE", controls.place_id.is_some());
+    button(inventory, "INV", controls.inventory_id.is_some());
     button(menu, "MENU", false);
 }
 
@@ -3134,7 +3187,7 @@ fn register_atlas(surface: &mut Surface) {
 fn interface_zoom_factor(configured: f32) -> f32 {
     #[cfg(target_os = "android")]
     {
-        configured * 1.4
+        configured * 1.55
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -3182,6 +3235,18 @@ fn draw_front(
         if let Stage::Front(front) = &mut surface.stage {
             let context = root.ctx().clone();
             action = front.draw(&context, config, client::app::HUD_FONT);
+            if matches!(&action, client::front::Action::Create { .. }) {
+                egui::Window::new("Creating world")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(&context, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Preparing world…");
+                        });
+                    });
+            }
             dirty = front.take_settings_dirty();
             if front.take_catalogue_dirty() {
                 catalogue = Some(front.catalogue.clone());
@@ -3266,10 +3331,8 @@ fn draw_hud(
     // default interface scale, which is the same units mistake as the click
     // offset above and was hiding behind the fact that a dialog has no edge to
     // line up with.
-    let size = {
-        let content = surface.egui.content_rect();
-        (content.width(), content.height())
-    };
+    let content = surface.egui.content_rect();
+    let size = (content.width(), content.height());
     let output = surface.egui.run_ui(raw, |root| {
         // **One scale for the whole interface**, set above rather than by every
         // panel: egui works in points, and the zoom factor is what a point is
@@ -3350,7 +3413,7 @@ fn draw_hud(
         );
         #[cfg(target_os = "android")]
         if touch_controls_visible {
-            draw_touch_controls(&context, size, touch_controls);
+            draw_touch_controls(&context, content, touch_controls);
         }
         egui::Area::new(egui::Id::new("hud"))
             .fixed_pos(egui::pos2(8.0, 8.0))
