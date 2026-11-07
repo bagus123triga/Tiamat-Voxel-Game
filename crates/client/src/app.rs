@@ -153,7 +153,21 @@ pub const REMESH_BUDGET: usize = 4;
 /// clones, so the bound is about the queue, not the frame: more than the
 /// workers can take up before the camera moves on would mesh far chunks
 /// first.
-pub const MESH_SUBMISSIONS_PER_FRAME: usize = 16;
+pub const MESH_SUBMISSIONS_PER_FRAME: usize = if cfg!(target_os = "android") {
+    8
+} else {
+    16
+};
+
+/// Completed chunk meshes uploaded to the GPU in one Android frame.
+///
+/// Buffer creation and queue writes are CPU work too. A small upload budget
+/// avoids a burst of finished worker jobs turning a camera turn into a hitch.
+pub const MESH_UPLOADS_PER_FRAME: usize = if cfg!(target_os = "android") {
+    2
+} else {
+    usize::MAX
+};
 
 /// How long a frame may spend remeshing before it stops and finishes next
 /// frame.
@@ -5244,7 +5258,7 @@ impl App {
 
         // Discard stale, unloaded, or now-distant worker results. Distant
         // chunks are rebuilt only if the player returns to their area.
-        for done in self.mesh_pool.drain() {
+        for done in self.mesh_pool.drain_limit(MESH_UPLOADS_PER_FRAME) {
             if self.in_flight.get(&done.pos) == Some(&done.generation) {
                 self.in_flight.remove(&done.pos);
             }

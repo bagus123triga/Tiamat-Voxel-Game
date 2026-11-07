@@ -2689,7 +2689,11 @@ fn draw_hud_scripts(app: &mut App, ctx: &egui::Context, icons: client::icons::Ic
         })
         .unwrap_or(false);
 
-    if !hides_crosshair {
+    let interface_open = app.menu_open()
+        || app.settings_open()
+        || app.chat_open()
+        || !app.dialogs().is_empty();
+    if !hides_crosshair && !interface_open {
         paint_crosshair(&painter, screen.center(), scale);
     }
 }
@@ -3411,12 +3415,22 @@ fn draw_front(
         if let Stage::Front(front) = &mut surface.stage {
             let context = root.ctx().clone();
             action = front.draw(&context, config, client::app::HUD_FONT);
-            if matches!(&action, client::front::Action::Create { .. }) {
-                draw_loading_overlay(
-                    &context,
-                    "Creating world",
-                    "Preparing world and loading its starting assets…",
-                );
+            match &action {
+                client::front::Action::Open(_) => {
+                    draw_loading_overlay(
+                        &context,
+                        "Loading world",
+                        "Connecting and preparing the selected world…",
+                    );
+                }
+                client::front::Action::Create { .. } => {
+                    draw_loading_overlay(
+                        &context,
+                        "Creating world",
+                        "Preparing world and loading its starting assets…",
+                    );
+                }
+                _ => {}
             }
             dirty = front.take_settings_dirty();
             if front.take_catalogue_dirty() {

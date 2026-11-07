@@ -100,8 +100,13 @@ impl MeshPool {
     /// and the embedded server, the rest up to six.
     #[must_use]
     pub fn default_workers() -> usize {
-        std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get().saturating_sub(2).clamp(1, 6))
+        let cores = std::thread::available_parallelism().map_or(1, |count| count.get());
+        if cfg!(target_os = "android") {
+            // Keep the render thread and embedded server responsive on phones.
+            cores.saturating_sub(3).clamp(1, 2)
+        } else {
+            cores.saturating_sub(2).clamp(1, 6)
+        }
     }
 
     /// Starts `threads` workers. Zero runs every job inline on `submit`.
@@ -189,8 +194,19 @@ impl MeshPool {
 
     /// Everything the workers have finished since the last call.
     pub fn drain(&mut self) -> Vec<Done> {
-        let mut finished: Vec<Done> = std::mem::take(&mut self.inline);
-        finished.extend(self.results.try_iter());
+        self.drain_limit(usize::MAX)
+    }
+
+    /// Takes at most `limit` finished meshes, leaving the rest for later
+    /// frames. This bounds GPU buffer creation and queue writes during a
+    /// streaming burst instead of uploading every completed chunk at once.
+    pub fn drain_limit(&mut self, limit: usize) -> Vec<Done> {
+        let inline_count = self.inline.len().min(limit);
+        let mut finished: Vec<Done> = self.inline.drain(..inline_count).collect();
+        let remaining = limit.saturating_sub(finished.len());
+        if remaining > 0 {
+            finished.extend(self.results.try_iter().take(remaining));
+        }
         self.backlog = self.backlog.saturating_sub(finished.len());
         finished
     }
@@ -354,6 +370,20 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert!(!finished[0].mesh.quads.is_empty());
         assert!(pool.drain().is_empty(), "handed back once");
+    }
+
+    #[test]
+    fn a_frame_budget_leaves_finished_meshes_for_the_next_frame() {
+        let store = store_with_a_floor();
+        let mut pool = MeshPool::new(0);
+        for _ in 0..3 {
+            pool.submit(job(&store));
+        }
+
+        let first = pool.drain_limit(2);
+        assert_eq!(first.len(), 2, "the frame takes no more than its budget");
+        let next = pool.drain();
+        assert_eq!(next.len(), 1, "the remaining mesh is retained");
     }
 
     #[test]

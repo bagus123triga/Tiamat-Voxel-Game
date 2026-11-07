@@ -190,12 +190,22 @@ pub fn draw(ctx: &egui::Context, panel: Panel<'_>) -> Drawn {
                     if !open {
                         return;
                     }
-                    let response = ui.add(
-                        egui::TextEdit::singleline(draft)
-                            .desired_width(WIDTH)
-                            .hint_text("say something"),
-                    );
-                    input = Some(response.rect);
+                    ui.horizontal(|ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(draft)
+                                .desired_width(WIDTH - 64.0)
+                                .hint_text("say something"),
+                        );
+                        input = Some(response.rect);
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                        if response.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            send = true;
+                        }
+                    });
                     // **Once, on the frame it opens — never every frame.**
                     //
                     // Reported from the window: chat did not work. It took the
@@ -206,9 +216,6 @@ pub fn draw(ctx: &egui::Context, panel: Panel<'_>) -> Drawn {
                     // there being typed into for ever.
                     if focus {
                         response.request_focus();
-                    }
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        send = true;
                     }
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         close = true;
