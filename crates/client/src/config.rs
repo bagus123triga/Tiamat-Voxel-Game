@@ -728,30 +728,6 @@ impl Config {
         resolve_install_path(&self.mods_path)
     }
 
-    /// Resolves Android's relative paths against its private application data
-    /// directory. Android's process working directory is not a writable,
-    /// persistent location and must never be used for saves or installed mods.
-    ///
-    /// An explicitly configured data path is retained; relative overrides are
-    /// interpreted under the app-private directory.
-    pub fn resolve_android_paths(&mut self, app_data_dir: &Path) {
-        if let Some(path) = self.data_path.as_mut() {
-            if path.is_relative() {
-                *path = app_data_dir.join(&*path);
-            }
-        } else {
-            self.data_path = Some(app_data_dir.to_path_buf());
-        }
-
-        let data_dir = self.data_dir();
-        if self.world_path.is_relative() {
-            self.world_path = data_dir.join(&self.world_path);
-        }
-        if self.mods_path.is_relative() {
-            self.mods_path = data_dir.join(&self.mods_path);
-        }
-    }
-
     /// The directory holding the identity key and the content cache.
     #[must_use]
     pub fn data_dir(&self) -> PathBuf {

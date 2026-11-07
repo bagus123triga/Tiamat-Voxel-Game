@@ -465,7 +465,10 @@ struct Surface {
     /// persist changes without reaching back into the event-loop owner.
     config_path: std::path::PathBuf,
     bindings_path: std::path::PathBuf,
-    surface: wgpu::Surface<'static>,
+    /// The instance and GPU survive Android suspension; only the native
+    /// window surface is invalidated by SurfaceView destruction.
+    instance: Arc<wgpu::Instance>,
+    surface: Option<wgpu::Surface<'static>>,
     /// **Kept here rather than reached through the renderer**, because the
     /// surface has to be configured and the front screen drawn before there is
     /// a renderer to ask. A clone is a second handle, not a second device.
@@ -485,6 +488,14 @@ struct Surface {
     /// atlas: see [`App::take_atlas_change`].
     atlas_texture: Option<egui::TextureId>,
     size: (u32, u32),
+}
+
+impl Surface {
+    fn render_surface(&self) -> &wgpu::Surface<'static> {
+        self.surface
+            .as_ref()
+            .expect("render surface accessed while Android is suspended")
+    }
 }
 
 /// Keys currently down, as intents rather than key codes.
@@ -786,15 +797,63 @@ struct Client {
 
 impl ApplicationHandler for Client {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if let Some(surface) = self.window.as_mut() {
+            // Winit keeps the Window alive across Android suspension, but the
+            // SurfaceView-backed wgpu surface must be recreated after resume.
+            if surface.surface.is_none() {
+                let recreated = match surface
+                    .instance
+                    .create_surface(Arc::clone(&surface.window))
+                {
+                    Ok(surface) => surface,
+                    Err(err) => {
+                        self.error = Some(Box::new(err));
+                        event_loop.exit();
+                        return;
+                    }
+                };
+                let capabilities =
+                    recreated.get_capabilities(&surface.gpu.adapter_handle);
+                let expected_format = surface.gpu.surface_format();
+                if !capabilities.formats.contains(&expected_format) {
+                    self.error = Some(Box::new(std::io::Error::other(format!(
+                        "resumed Android surface no longer supports {expected_format:?}"
+                    ))));
+                    event_loop.exit();
+                    return;
+                }
+                self.present_mode = configure_surface(
+                    &recreated,
+                    &surface.gpu,
+                    surface.size,
+                    self.config.vsync,
+                );
+                surface.surface = Some(recreated);
+            }
+            surface.window.request_redraw();
             return;
         }
+
         match self.create_window(event_loop) {
             Ok(surface) => self.window = Some(surface),
             Err(err) => {
                 self.error = Some(err);
                 event_loop.exit();
             }
+        }
+    }
+
+    fn suspended(&mut self, _: &ActiveEventLoop) {
+        self.held = Held::default();
+        self.grabbed = false;
+        self.digging = false;
+        if let Some(surface) = self.window.as_mut() {
+            if let Stage::Playing(app) = &mut surface.stage {
+                app.stop_digging();
+            }
+            // Winit 0.30 requires all render surfaces to be dropped before
+            // this callback returns on Android. Keep the world and GPU alive.
+            surface.surface = None;
         }
     }
 
@@ -813,6 +872,9 @@ impl ApplicationHandler for Client {
         let Some(surface) = self.window.as_mut() else {
             return;
         };
+        if surface.surface.is_none() {
+            return;
+        }
 
         // egui gets first refusal. When it wants an event — a click on a
         // widget, a keystroke in a text field — the world must not also act on
@@ -842,7 +904,7 @@ impl ApplicationHandler for Client {
             WindowEvent::Resized(size) => {
                 surface.size = (size.width.max(1), size.height.max(1));
                 configure_surface(
-                    &surface.surface,
+                    surface.render_surface(),
                     &surface.gpu,
                     surface.size,
                     self.config.vsync,
@@ -879,7 +941,9 @@ impl ApplicationHandler for Client {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(surface) = &self.window {
+        if let Some(surface) = &self.window
+            && surface.surface.is_some()
+        {
             surface.window.request_redraw();
         }
     }
@@ -1170,8 +1234,8 @@ impl Client {
             .with_inner_size(winit::dpi::LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1));
         let window = Arc::new(event_loop.create_window(attributes)?);
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(Arc::clone(&window)),
+        let instance = Arc::new(wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(Arc::clone(&window))),
         ));
         let surface = instance.create_surface(Arc::clone(&window))?;
         // The adapter is chosen for THIS surface. Asking for one without it and
@@ -1244,7 +1308,8 @@ impl Client {
             window,
             config_path: self.config_path.clone(),
             bindings_path: self.bindings_path.clone(),
-            surface,
+            instance,
+            surface: Some(surface),
             gpu,
             stage,
             egui,
@@ -1296,7 +1361,7 @@ impl Client {
         // ticking the box on the front screen performs.
         let present_mode = match self.window.as_ref() {
             Some(surface) => configure_surface(
-                &surface.surface,
+                surface.render_surface(),
                 &surface.gpu,
                 surface.size,
                 self.config.vsync,
@@ -1422,12 +1487,12 @@ impl Client {
         let Some(surface) = self.window.as_mut() else {
             return false;
         };
-        let frame = match surface.surface.get_current_texture() {
+        let frame = match surface.render_surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 configure_surface(
-                    &surface.surface,
+                    surface.render_surface(),
                     &surface.gpu,
                     surface.size,
                     self.config.vsync,
@@ -1892,7 +1957,7 @@ impl Client {
         // vsync wait now, and a large number there is the display doing its job
         // rather than a hitch — read `present`, `world` and `remesh` for work.
         let phase = std::time::Instant::now();
-        let frame = match surface.surface.get_current_texture() {
+        let frame = match surface.render_surface().get_current_texture() {
             // Suboptimal still hands over a usable texture. Reconfiguring is
             // recommended, not required, and doing it mid-frame would drop a
             // frame every time the window was being dragged.
@@ -1904,7 +1969,7 @@ impl Client {
             // costs nothing, which is the point of asking first.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 configure_surface(
-                    &surface.surface,
+                    surface.render_surface(),
                     &surface.gpu,
                     surface.size,
                     self.config.vsync,

@@ -909,6 +909,9 @@ fn corner_tints_of(tints: &BTreeMap<(i32, i32), [u8; 3]>, x: i32, z: i32) -> [[f
 pub struct Gpu {
     /// The logical device.
     pub device: wgpu::Device,
+    /// The adapter used to create the device. Kept so a new Android surface
+    /// can be checked against the same physical GPU after resume.
+    pub adapter_handle: std::sync::Arc<wgpu::Adapter>,
     /// Its queue.
     pub queue: wgpu::Queue,
     /// A human-readable adapter name, for the HUD and for screenshot goldens.
@@ -1024,6 +1027,7 @@ impl Gpu {
 
         Ok(Self {
             device,
+            adapter_handle: std::sync::Arc::new(adapter),
             queue,
             adapter: info.name,
             backend: format!("{:?}", info.backend),
