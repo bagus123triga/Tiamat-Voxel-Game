@@ -2002,7 +2002,7 @@ impl Client {
         // vsync wait now, and a large number there is the display doing its job
         // rather than a hitch — read `present`, `world` and `remesh` for work.
         let phase = std::time::Instant::now();
-        let frame = match surface.render_surface().get_current_texture() {
+        let frame = match surface.surface.as_ref().expect("render surface accessed while Android is suspended").get_current_texture() {
             // Suboptimal still hands over a usable texture. Reconfiguring is
             // recommended, not required, and doing it mid-frame would drop a
             // frame every time the window was being dragged.
@@ -2014,7 +2014,7 @@ impl Client {
             // costs nothing, which is the point of asking first.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 configure_surface(
-                    surface.render_surface(),
+                    surface.surface.as_ref().expect("render surface accessed while Android is suspended"),
                     &surface.gpu,
                     surface.size,
                     self.config.vsync,
