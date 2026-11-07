@@ -4199,6 +4199,12 @@ impl App {
         self.volumes_dirty = true;
     }
 
+    /// The server-granted detail render distance, in horizontal and vertical chunks.
+    #[must_use]
+    pub const fn render_distance(&self) -> (u8, u8) {
+        (self.granted_view.horizontal, self.granted_view.vertical)
+    }
+
     /// Whether the HUD is drawn.
     #[must_use]
     pub const fn hud_visible(&self) -> bool {
