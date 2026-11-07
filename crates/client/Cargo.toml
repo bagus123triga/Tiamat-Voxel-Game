@@ -78,3 +78,6 @@ harness = false
 
 [build-dependencies]
 winresource.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
