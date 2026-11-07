@@ -1878,6 +1878,12 @@ impl App {
         )
     }
 
+    /// The current smoothed frame rate, for the always-visible mobile readout.
+    #[must_use]
+    pub const fn fps(&self) -> f32 {
+        self.fps
+    }
+
     /// The buffer-pool and prediction line of the HUD.
     ///
     /// Its own method because `hud` is at the line limit and because this line

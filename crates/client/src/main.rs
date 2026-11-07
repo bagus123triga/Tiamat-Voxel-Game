@@ -2166,18 +2166,20 @@ fn process_touch_event(
 ) {
     use winit::event::TouchPhase;
 
+    const TOUCH_SCALE: f32 = 1.25;
+
     let scale = pixels_per_point.max(0.1);
     let position = (
         touch.location.x as f32 / scale,
         touch.location.y as f32 / scale,
     );
     let (width, height) = size;
-    let joystick = (88.0_f32.min(width * 0.22), height - 98.0);
-    let jump = (width - 78.0, height - 164.0);
-    let dig = (width - 78.0, height - 76.0);
-    let place = (width - 166.0, height - 76.0);
-    let menu = (width - 54.0, 48.0);
-    let button_radius = 43.0;
+    let joystick = ((88.0 * TOUCH_SCALE).min(width * 0.22), height - 98.0 * TOUCH_SCALE);
+    let jump = (width - 78.0 * TOUCH_SCALE, height - 164.0 * TOUCH_SCALE);
+    let dig = (width - 78.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
+    let place = (width - 166.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
+    let menu = (width - 54.0 * TOUCH_SCALE, 48.0 * TOUCH_SCALE);
+    let button_radius = 43.0 * TOUCH_SCALE;
 
     // Touches must not continue moving the player behind a menu, chat box or
     // server dialog. Android does not guarantee a release on focus changes.
@@ -2195,7 +2197,7 @@ fn process_touch_event(
     match touch.phase {
         TouchPhase::Started => {
             // A menu target keeps pause/settings reachable without a keyboard.
-            if near(menu, 34.0) {
+            if near(menu, 34.0 * TOUCH_SCALE) {
                 app.set_menu_open(true);
                 release_touch_controls(controls, held, digging, app);
                 return;
@@ -2268,7 +2270,7 @@ fn update_touch_joystick(
 ) {
     let dx = position.0 - centre.0;
     let dy = position.1 - centre.1;
-    let radius = 64.0;
+    let radius = 64.0 * 1.25;
     let distance = (dx * dx + dy * dy).sqrt();
     let factor = if distance > radius {
         radius / distance
@@ -2276,7 +2278,7 @@ fn update_touch_joystick(
         1.0
     };
     controls.joystick_offset = (dx * factor, dy * factor);
-    let dead_zone = 13.0;
+    let dead_zone = 13.0 * 1.25;
     held.left = dx < -dead_zone;
     held.right = dx > dead_zone;
     held.forward = dy < -dead_zone;
@@ -2287,11 +2289,12 @@ fn update_touch_joystick(
 #[cfg(target_os = "android")]
 fn draw_touch_controls(context: &egui::Context, size: (f32, f32), controls: TouchControls) {
     let (width, height) = size;
-    let joystick = (88.0_f32.min(width * 0.22), height - 98.0);
-    let jump = (width - 78.0, height - 164.0);
-    let dig = (width - 78.0, height - 76.0);
-    let place = (width - 166.0, height - 76.0);
-    let menu = (width - 54.0, 48.0);
+    const TOUCH_SCALE: f32 = 1.25;
+    let joystick = ((88.0 * TOUCH_SCALE).min(width * 0.22), height - 98.0 * TOUCH_SCALE);
+    let jump = (width - 78.0 * TOUCH_SCALE, height - 164.0 * TOUCH_SCALE);
+    let dig = (width - 78.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
+    let place = (width - 166.0 * TOUCH_SCALE, height - 76.0 * TOUCH_SCALE);
+    let menu = (width - 54.0 * TOUCH_SCALE, 48.0 * TOUCH_SCALE);
     let painter = context.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("android-touch-controls"),
@@ -2301,28 +2304,28 @@ fn draw_touch_controls(context: &egui::Context, size: (f32, f32), controls: Touc
     let active = egui::Color32::from_rgba_unmultiplied(74, 125, 190, 190);
 
     let base = egui::pos2(joystick.0, joystick.1);
-    painter.circle_filled(base, 66.0, faint);
-    painter.circle_stroke(base, 66.0, egui::Stroke::new(2.0, edge));
+    painter.circle_filled(base, 66.0 * TOUCH_SCALE, faint);
+    painter.circle_stroke(base, 66.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
     let knob = egui::pos2(
         joystick.0 + controls.joystick_offset.0,
         joystick.1 + controls.joystick_offset.1,
     );
     painter.circle_filled(
         knob,
-        27.0,
+        27.0 * TOUCH_SCALE,
         if controls.joystick_id.is_some() { active } else { faint },
     );
-    painter.circle_stroke(knob, 27.0, egui::Stroke::new(2.0, edge));
+    painter.circle_stroke(knob, 27.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
 
     let button = |point: (f32, f32), label: &str, pressed: bool| {
         let centre = egui::pos2(point.0, point.1);
-        painter.circle_filled(centre, 36.0, if pressed { active } else { faint });
-        painter.circle_stroke(centre, 36.0, egui::Stroke::new(2.0, edge));
+        painter.circle_filled(centre, 36.0 * TOUCH_SCALE, if pressed { active } else { faint });
+        painter.circle_stroke(centre, 36.0 * TOUCH_SCALE, egui::Stroke::new(2.0 * TOUCH_SCALE, edge));
         painter.text(
             centre,
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(15.0),
+            egui::FontId::proportional(15.0 * TOUCH_SCALE),
             egui::Color32::WHITE,
         );
     };
@@ -3127,6 +3130,18 @@ fn register_atlas(surface: &mut Surface) {
     ));
 }
 
+/// A modest Android-only zoom boost for phone and tablet viewing distances.
+fn interface_zoom_factor(configured: f32) -> f32 {
+    #[cfg(target_os = "android")]
+    {
+        configured * 1.4
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        configured
+    }
+}
+
 /// A world's name and its settings answers, as changed on the Mods tab.
 type AnsweredSettings = (String, std::collections::BTreeMap<String, u32>);
 
@@ -3156,7 +3171,7 @@ fn draw_front(
     // stands after — so setting it in between makes a frame whose clicks and
     // whose pixels disagree, on every frame the scale changes. Set here, all
     // three agree.
-    surface.egui.set_zoom_factor(config.ui_scale);
+    surface.egui.set_zoom_factor(interface_zoom_factor(config.ui_scale));
     let raw = surface.egui_state.take_egui_input(&surface.window);
     let mut action = client::front::Action::None;
     let mut dirty = false;
@@ -3214,7 +3229,7 @@ fn draw_hud(
     register_atlas(surface);
     // Before the input, for the reason spelled out in `draw_front`.
     if let Stage::Playing(app) = &surface.stage {
-        surface.egui.set_zoom_factor(app.ui_scale());
+        surface.egui.set_zoom_factor(interface_zoom_factor(app.ui_scale()));
     }
     let raw = surface.egui_state.take_egui_input(&surface.window);
     let Stage::Playing(app) = &mut surface.stage else {
@@ -3228,6 +3243,7 @@ fn draw_hud(
     } else {
         Vec::new()
     };
+    let fps = app.fps();
     let warnings: Vec<String> = app.warnings().to_vec();
     let joined = app.joined();
 
@@ -3336,9 +3352,6 @@ fn draw_hud(
         if touch_controls_visible {
             draw_touch_controls(&context, size, touch_controls);
         }
-        if lines.is_empty() && warnings.is_empty() && joined {
-            return;
-        }
         egui::Area::new(egui::Id::new("hud"))
             .fixed_pos(egui::pos2(8.0, 8.0))
             .interactable(false)
@@ -3349,6 +3362,11 @@ fn draw_hud(
                     .fill(egui::Color32::from_black_alpha(160))
                     .inner_margin(6.0)
                     .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{fps:.0} FPS"))
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        );
                         for line in &lines {
                             ui.label(egui::RichText::new(line).color(egui::Color32::WHITE));
                         }
