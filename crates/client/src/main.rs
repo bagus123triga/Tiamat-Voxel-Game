@@ -819,6 +819,9 @@ struct Client {
 
 impl ApplicationHandler for Client {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // A resumed Android activity needs frames again; suspension switches
+        // the loop to Wait so a hidden game does not burn a CPU core polling.
+        event_loop.set_control_flow(ControlFlow::Poll);
         if let Some(surface) = self.window.as_mut() {
             // Winit keeps the Window alive across Android suspension, but the
             // SurfaceView-backed wgpu surface must be recreated after resume.
@@ -865,7 +868,11 @@ impl ApplicationHandler for Client {
         }
     }
 
-    fn suspended(&mut self, _: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        // No surface is available while Android owns the activity lifecycle.
+        // Wait for the next lifecycle/input event instead of spinning a frame
+        // loop that cannot present anything.
+        event_loop.set_control_flow(ControlFlow::Wait);
         self.held = Held::default();
         self.touch_controls.clear();
         self.grabbed = false;
