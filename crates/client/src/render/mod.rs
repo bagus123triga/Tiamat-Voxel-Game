@@ -3247,8 +3247,8 @@ impl Renderer {
         // heap block for a default view, before one instance was written.
         let mut instances = std::mem::take(&mut self.instance_scratch);
         instances.clear();
-        // A conservative upper bound for chunks that can intersect the
-        // axis-aligned detail box. Do not reserve for every chunk ever visited.
+        // A conservative upper bound for detail plus horizon chunks that can
+        // be resident. Do not reserve for every chunk ever visited.
         let horizontal_diameter =
             usize::from(self.view_horizontal.max(self.horizon_horizontal))
                 .saturating_mul(2)

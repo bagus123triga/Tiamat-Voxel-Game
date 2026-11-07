@@ -4267,6 +4267,12 @@ impl App {
         for pos in drawn {
             self.renderer.remove_chunk(&self.drawn_at(pos));
         }
+        // Summary meshes are not in store.positions(): remove them explicitly
+        // or a domain switch leaves the previous world's horizon resident.
+        let horizon: Vec<_> = self.horizon.built.iter().copied().collect();
+        for pos in horizon {
+            self.renderer.remove_chunk(&self.drawn_at(pos));
+        }
         self.horizon.beyond.clear();
         self.horizon.built.clear();
         self.store.clear();
@@ -5108,12 +5114,10 @@ impl App {
                 self.horizon.beyond.remove(&pos);
                 self.horizon.built.remove(&pos);
                 self.evicted_meshes.remove(&pos);
-                if self.store.remove(pos) {
-                    // The mesh has to go with the data. A renderer holding
-                    // a mesh for a chunk the store has forgotten draws a
-                    // ghost that nothing will ever update.
-                    self.renderer.remove_chunk(&self.drawn_at(pos));
-                }
+                self.store.remove(pos);
+                // The unload applies to detail OR summary data. Always retire
+                // the renderer entry, even when there was no full chunk stored.
+                self.renderer.remove_chunk(&self.drawn_at(pos));
             }
 
             Event::DomainChanged { domain } => self.enter_domain(&domain),
