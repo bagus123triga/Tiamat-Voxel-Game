@@ -839,3 +839,8 @@ mod tests {
         assert_eq!(super::units_per_block(), tiamat_core::UNITS_PER_BLOCK);
     }
 }
+
+#[cfg(target_os = "android")]
+#[allow(dead_code)]
+#[path = "main.rs"]
+mod android_entry;
