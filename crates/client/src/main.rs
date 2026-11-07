@@ -421,6 +421,7 @@ fn run_inner(_platform_app: PlatformEventLoopApp) -> Result<(), Box<dyn std::err
         beacon: None,
         window: None,
         held: Held::default(),
+        touch_controls: TouchControls::default(),
         bindings: Some(bindings),
         last_frame: std::time::Instant::now(),
         pending_teleport: None,
@@ -537,6 +538,26 @@ impl Held {
         // frame rates, which is the worst time for it.
         self.look = (0.0, 0.0);
         input
+    }
+}
+
+/// State for the native touch controls. Finger IDs remain stable until their
+/// Ended/Cancelled event, so two simultaneous fingers can move and look without
+/// stealing one another's gestures.
+#[derive(Debug, Default, Clone, Copy)]
+struct TouchControls {
+    joystick_id: Option<u64>,
+    joystick_offset: (f32, f32),
+    look_id: Option<u64>,
+    look_last: (f32, f32),
+    jump_id: Option<u64>,
+    dig_id: Option<u64>,
+    place_id: Option<u64>,
+}
+
+impl TouchControls {
+    fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -768,6 +789,7 @@ struct Client {
     beacon: Option<tiamat_server::announce::Announcer>,
     window: Option<Surface>,
     held: Held,
+    touch_controls: TouchControls,
     /// The player's saved bindings, until the `App` exists to hold them.
     ///
     /// Read from disk before a window is created and handed over at
@@ -845,6 +867,7 @@ impl ApplicationHandler for Client {
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
         self.held = Held::default();
+        self.touch_controls.clear();
         self.grabbed = false;
         self.digging = false;
         if let Some(surface) = self.window.as_mut() {
@@ -915,6 +938,7 @@ impl ApplicationHandler for Client {
             // A player who alt-tabs mid-dig gets no release event at all, and
             // the same stuck dig as the bug above. Cheap to be sure about.
             WindowEvent::Focused(false) => {
+                self.touch_controls.clear();
                 if let Stage::Playing(app) = &mut surface.stage {
                     self.grabbed = hand_over(
                         &surface.window,
@@ -980,6 +1004,20 @@ impl Client {
         let window = &surface.window;
 
         match event {
+            #[cfg(target_os = "android")]
+            WindowEvent::Touch(touch) => {
+                let content = surface.egui.content_rect();
+                process_touch_event(
+                    &mut self.touch_controls,
+                    &mut self.held,
+                    &mut self.digging,
+                    app,
+                    touch,
+                    (content.width(), content.height()),
+                    egui_winit::pixels_per_point(&surface.egui, window),
+                );
+            }
+
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 // **Click to look FIRST, and before any action lookup.** Until
@@ -2055,7 +2093,7 @@ impl Client {
         phases.world = elapsed_ms(phase);
 
         let phase = std::time::Instant::now();
-        draw_hud(surface, &view);
+        draw_hud(surface, &view, self.touch_controls);
         phases.hud = elapsed_ms(phase);
 
         let phase = std::time::Instant::now();
@@ -2081,6 +2119,210 @@ impl Client {
         app.record_phases(phases);
         true
     }
+}
+
+/// Releases touch-owned controls without disturbing keyboard or mouse state.
+#[cfg(target_os = "android")]
+fn release_touch_controls(
+    controls: &mut TouchControls,
+    held: &mut Held,
+    digging: &mut bool,
+    app: &mut App,
+) {
+    if controls.joystick_id.is_some() {
+        held.forward = false;
+        held.back = false;
+        held.left = false;
+        held.right = false;
+    }
+    if controls.jump_id.is_some() {
+        held.up = false;
+    }
+    if controls.dig_id.is_some() {
+        *digging = false;
+        app.stop_digging();
+    }
+    controls.clear();
+}
+
+/// Routes Android finger gestures into the same input state used by the
+/// existing simulation path; no alternate movement or server protocol is added.
+#[cfg(target_os = "android")]
+fn process_touch_event(
+    controls: &mut TouchControls,
+    held: &mut Held,
+    digging: &mut bool,
+    app: &mut App,
+    touch: winit::event::Touch,
+    size: (f32, f32),
+    pixels_per_point: f32,
+) {
+    use winit::event::TouchPhase;
+
+    let scale = pixels_per_point.max(0.1);
+    let position = (
+        touch.location.x as f32 / scale,
+        touch.location.y as f32 / scale,
+    );
+    let (width, height) = size;
+    let joystick = (88.0_f32.min(width * 0.22), height - 98.0);
+    let jump = (width - 78.0, height - 164.0);
+    let dig = (width - 78.0, height - 76.0);
+    let place = (width - 166.0, height - 76.0);
+    let menu = (width - 54.0, 48.0);
+    let button_radius = 43.0;
+
+    // Touches must not continue moving the player behind a menu, chat box or
+    // server dialog. Android does not guarantee a release on focus changes.
+    if app.menu_open() || app.chat_open() || !app.dialogs().is_empty() {
+        release_touch_controls(controls, held, digging, app);
+        return;
+    }
+
+    let near = |point: (f32, f32), radius: f32| {
+        let dx = position.0 - point.0;
+        let dy = position.1 - point.1;
+        dx * dx + dy * dy <= radius * radius
+    };
+
+    match touch.phase {
+        TouchPhase::Started => {
+            // A menu target keeps pause/settings reachable without a keyboard.
+            if near(menu, 34.0) {
+                app.set_menu_open(true);
+                release_touch_controls(controls, held, digging, app);
+                return;
+            }
+            if controls.jump_id.is_none() && near(jump, button_radius) {
+                controls.jump_id = Some(touch.id);
+                held.up = true;
+            } else if controls.dig_id.is_none() && near(dig, button_radius) {
+                controls.dig_id = Some(touch.id);
+                *digging = true;
+            } else if controls.place_id.is_none() && near(place, button_radius) {
+                controls.place_id = Some(touch.id);
+                app.place();
+            } else if controls.joystick_id.is_none()
+                && position.0 < width * 0.42
+                && position.1 > height * 0.48
+            {
+                controls.joystick_id = Some(touch.id);
+                update_touch_joystick(controls, held, position, joystick);
+            } else if controls.look_id.is_none() && position.0 >= width * 0.42 {
+                controls.look_id = Some(touch.id);
+                controls.look_last = position;
+            }
+        }
+        TouchPhase::Moved => {
+            if controls.joystick_id == Some(touch.id) {
+                update_touch_joystick(controls, held, position, joystick);
+            } else if controls.look_id == Some(touch.id) {
+                held.look.0 += position.0 - controls.look_last.0;
+                held.look.1 += position.1 - controls.look_last.1;
+                controls.look_last = position;
+            }
+        }
+        TouchPhase::Ended | TouchPhase::Cancelled => {
+            if controls.jump_id == Some(touch.id) {
+                controls.jump_id = None;
+                held.up = false;
+            }
+            if controls.dig_id == Some(touch.id) {
+                controls.dig_id = None;
+                *digging = false;
+                app.stop_digging();
+            }
+            if controls.place_id == Some(touch.id) {
+                controls.place_id = None;
+            }
+            if controls.joystick_id == Some(touch.id) {
+                controls.joystick_id = None;
+                controls.joystick_offset = (0.0, 0.0);
+                held.forward = false;
+                held.back = false;
+                held.left = false;
+                held.right = false;
+            }
+            if controls.look_id == Some(touch.id) {
+                controls.look_id = None;
+            }
+        }
+    }
+}
+
+/// Updates the virtual joystick, clamping its visual knob and applying a small
+/// dead zone before mapping it to the existing digital movement axes.
+#[cfg(target_os = "android")]
+fn update_touch_joystick(
+    controls: &mut TouchControls,
+    held: &mut Held,
+    position: (f32, f32),
+    centre: (f32, f32),
+) {
+    let dx = position.0 - centre.0;
+    let dy = position.1 - centre.1;
+    let radius = 64.0;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let factor = if distance > radius {
+        radius / distance
+    } else {
+        1.0
+    };
+    controls.joystick_offset = (dx * factor, dy * factor);
+    let dead_zone = 13.0;
+    held.left = dx < -dead_zone;
+    held.right = dx > dead_zone;
+    held.forward = dy < -dead_zone;
+    held.back = dy > dead_zone;
+}
+
+/// Draws the mobile controls in points, matching the hit regions used above.
+#[cfg(target_os = "android")]
+fn draw_touch_controls(context: &egui::Context, size: (f32, f32), controls: TouchControls) {
+    let (width, height) = size;
+    let joystick = (88.0_f32.min(width * 0.22), height - 98.0);
+    let jump = (width - 78.0, height - 164.0);
+    let dig = (width - 78.0, height - 76.0);
+    let place = (width - 166.0, height - 76.0);
+    let menu = (width - 54.0, 48.0);
+    let painter = context.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("android-touch-controls"),
+    ));
+    let faint = egui::Color32::from_rgba_unmultiplied(20, 27, 40, 105);
+    let edge = egui::Color32::from_white_alpha(145);
+    let active = egui::Color32::from_rgba_unmultiplied(74, 125, 190, 190);
+
+    let base = egui::pos2(joystick.0, joystick.1);
+    painter.circle_filled(base, 66.0, faint);
+    painter.circle_stroke(base, 66.0, egui::Stroke::new(2.0, edge));
+    let knob = egui::pos2(
+        joystick.0 + controls.joystick_offset.0,
+        joystick.1 + controls.joystick_offset.1,
+    );
+    painter.circle_filled(
+        knob,
+        27.0,
+        if controls.joystick_id.is_some() { active } else { faint },
+    );
+    painter.circle_stroke(knob, 27.0, egui::Stroke::new(2.0, edge));
+
+    let button = |point: (f32, f32), label: &str, pressed: bool| {
+        let centre = egui::pos2(point.0, point.1);
+        painter.circle_filled(centre, 36.0, if pressed { active } else { faint });
+        painter.circle_stroke(centre, 36.0, egui::Stroke::new(2.0, edge));
+        painter.text(
+            centre,
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(15.0),
+            egui::Color32::WHITE,
+        );
+    };
+    button(jump, "JUMP", controls.jump_id.is_some());
+    button(dig, "DIG", controls.dig_id.is_some());
+    button(place, "PLACE", controls.place_id.is_some());
+    button(menu, "MENU", false);
 }
 
 /// Milliseconds since an instant, for one phase of a frame.
@@ -2955,7 +3197,13 @@ fn draw_front(
 ///
 /// A second render pass that loads rather than clears, so it composites onto
 /// the world instead of replacing it.
-fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
+fn draw_hud(
+    surface: &mut Surface,
+    view: &wgpu::TextureView,
+    touch_controls: TouchControls,
+) {
+    #[cfg(not(target_os = "android"))]
+    let _ = touch_controls;
     register_atlas(surface);
     // Before the input, for the reason spelled out in `draw_front`.
     if let Stage::Playing(app) = &surface.stage {
@@ -2978,6 +3226,8 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
 
     let settings_open = app.settings_open();
     let menu_open = app.menu_open();
+    let touch_controls_visible =
+        !menu_open && !settings_open && !app.chat_open() && app.dialogs().is_empty();
     // Cloned out because the closure below borrows `app` mutably, and
     // the interface needs to read the atlas layout while it does.
     let tiles = app.tiles().clone();
@@ -3075,6 +3325,10 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
                 .with_cards(&cards)
                 .with_models(&model_icons),
         );
+        #[cfg(target_os = "android")]
+        if touch_controls_visible {
+            draw_touch_controls(&context, size, touch_controls);
+        }
         if lines.is_empty() && warnings.is_empty() && joined {
             return;
         }
