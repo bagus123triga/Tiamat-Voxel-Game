@@ -197,6 +197,14 @@ pub fn draw(ctx: &egui::Context, panel: Panel<'_>) -> Drawn {
                                 .hint_text("say something"),
                         );
                         input = Some(response.rect);
+                        // **Once, on the frame it opens — never every frame.**
+                        //
+                        // Keep focus on the input, not the close button: Enter
+                        // is still reported as lost focus by egui's single-line
+                        // editor and is handled immediately below.
+                        if focus {
+                            response.request_focus();
+                        }
                         if ui.button("Close").clicked() {
                             close = true;
                         }
@@ -206,17 +214,6 @@ pub fn draw(ctx: &egui::Context, panel: Panel<'_>) -> Drawn {
                             send = true;
                         }
                     });
-                    // **Once, on the frame it opens — never every frame.**
-                    //
-                    // Reported from the window: chat did not work. It took the
-                    // keys and never sent, because egui reports a single-line
-                    // field's Enter as `lost_focus`, and a field handed focus
-                    // back on every frame never loses it. Enter was landing on
-                    // a box that immediately took focus again, so the line sat
-                    // there being typed into for ever.
-                    if focus {
-                        response.request_focus();
-                    }
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         close = true;
                     }
