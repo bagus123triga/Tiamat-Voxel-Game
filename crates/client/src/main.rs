@@ -559,6 +559,8 @@ struct TouchControls {
     sprint_id: Option<u64>,
     sneak_id: Option<u64>,
     fly_id: Option<u64>,
+    tool_id: Option<u64>,
+    offhand_id: Option<u64>,
     dig_id: Option<u64>,
     place_id: Option<u64>,
     inventory_id: Option<u64>,
@@ -584,6 +586,8 @@ struct TouchLayout {
     menu: (f32, f32),
     chat: (f32, f32),
     fly: (f32, f32),
+    tool: (f32, f32),
+    offhand: (f32, f32),
     button_radius: f32,
     button_scale: f32,
     joystick_scale: f32,
@@ -597,12 +601,13 @@ fn touch_layout(width: f32, height: f32) -> TouchLayout {
         (88.0 * JOYSTICK_SCALE).min(width * 0.22),
         height - 98.0 * JOYSTICK_SCALE,
     );
-    let (jump, use_action, sprint, dig, place, sneak) = if height > width {
+    let (jump, use_action, sprint, dig, place, sneak, tool, offhand) = if height > width {
         let right = width - 76.0 * BUTTON_SCALE;
         let left = width - 164.0 * BUTTON_SCALE;
-        let top = height - 430.0 * BUTTON_SCALE;
-        let middle = height - 330.0 * BUTTON_SCALE;
-        let bottom = height - 230.0 * BUTTON_SCALE;
+        let top = height - 460.0 * BUTTON_SCALE;
+        let middle = height - 360.0 * BUTTON_SCALE;
+        let bottom = height - 260.0 * BUTTON_SCALE;
+        let utility = height - 170.0 * BUTTON_SCALE;
         (
             (right, top),
             (left, top),
@@ -610,6 +615,8 @@ fn touch_layout(width: f32, height: f32) -> TouchLayout {
             (right, bottom),
             (left, bottom),
             (left, middle),
+            (right, utility),
+            (left, utility),
         )
     } else {
         let right = width - 78.0 * BUTTON_SCALE;
@@ -617,6 +624,7 @@ fn touch_layout(width: f32, height: f32) -> TouchLayout {
         let left = width - 254.0 * BUTTON_SCALE;
         let top = height - 250.0 * BUTTON_SCALE;
         let bottom = height - 160.0 * BUTTON_SCALE;
+        let utility = height - 340.0 * BUTTON_SCALE;
         (
             (right, top),
             (middle, top),
@@ -624,6 +632,8 @@ fn touch_layout(width: f32, height: f32) -> TouchLayout {
             (right, bottom),
             (middle, bottom),
             (left, bottom),
+            (left, utility),
+            (middle, utility),
         )
     };
     TouchLayout {
@@ -638,6 +648,8 @@ fn touch_layout(width: f32, height: f32) -> TouchLayout {
         menu: (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
         chat: (54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
         fly: (154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
+        tool,
+        offhand,
         button_radius: 43.0 * BUTTON_SCALE,
         button_scale: BUTTON_SCALE,
         joystick_scale: JOYSTICK_SCALE,
@@ -2324,6 +2336,16 @@ fn process_touch_event(
                 app.toggle_fly();
                 return;
             }
+            if controls.tool_id.is_none() && near(layout.tool, layout.button_radius) {
+                controls.tool_id = Some(touch.id);
+                app.next_tool();
+                return;
+            }
+            if controls.offhand_id.is_none() && near(layout.offhand, layout.button_radius) {
+                controls.offhand_id = Some(touch.id);
+                app.swap_offhand();
+                return;
+            }
             if controls.jump_id.is_none() && near(layout.jump, layout.button_radius) {
                 controls.jump_id = Some(touch.id);
                 held.up = true;
@@ -2387,6 +2409,12 @@ fn process_touch_event(
             }
             if controls.fly_id == Some(touch.id) {
                 controls.fly_id = None;
+            }
+            if controls.tool_id == Some(touch.id) {
+                controls.tool_id = None;
+            }
+            if controls.offhand_id == Some(touch.id) {
+                controls.offhand_id = None;
             }
             if controls.dig_id == Some(touch.id) {
                 controls.dig_id = None;
@@ -2521,6 +2549,8 @@ fn draw_touch_controls(
     if may_fly {
         button(layout.fly, "FLY", flying || controls.fly_id.is_some());
     }
+    button(layout.tool, "TOOL", controls.tool_id.is_some());
+    button(layout.offhand, "SWAP", controls.offhand_id.is_some());
 }
 
 /// Milliseconds since an instant, for one phase of a frame.
