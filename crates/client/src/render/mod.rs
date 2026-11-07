@@ -1128,6 +1128,8 @@ pub struct Renderer {
     /// independently.
     tints: TintTable,
     chunks: BTreeMap<ChunkPos, ChunkMesh>,
+    /// Drawn chunk positions whose GPU meshes were evicted beyond the detail radius.
+    evicted: Vec<ChunkPos>,
     /// The model blocks of each resident chunk, from the mesh that chunk was
     /// last built with (Contract §8.6 "Found at remesh"). **Its own map rather
     /// than a field of [`ChunkMesh`]**, because a chunk holding only a brazier
@@ -1425,6 +1427,7 @@ impl Renderer {
             tints,
             biomes: ColumnTints::default(),
             chunks: BTreeMap::new(),
+            evicted: Vec::new(),
             model_blocks: BTreeMap::new(),
             flickering: Flickering::default(),
             pool: BufferPool::default(),
@@ -2647,7 +2650,13 @@ impl Renderer {
     pub fn remove_chunk(&mut self, pos: &ChunkPos) {
         self.model_blocks.remove(pos);
         self.flickering.blocks.remove(pos);
+        self.evicted.retain(|evicted| evicted != pos);
         self.drop_mesh(pos);
+    }
+
+    /// Positions evicted by the detail-radius cull, for the app to remesh on return.
+    pub fn take_evicted_chunks(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.evicted)
     }
 
     /// Returns a chunk's buffers to the pool, keeping its model blocks.
@@ -2671,6 +2680,7 @@ impl Renderer {
     pub fn clear(&mut self) {
         self.model_blocks.clear();
         self.flickering.blocks.clear();
+        self.evicted.clear();
         for (_, mesh) in std::mem::take(&mut self.chunks) {
             self.pool.give_mesh(mesh);
         }
@@ -3200,9 +3210,20 @@ impl Renderer {
         // heap block for a default view, before one instance was written.
         let mut instances = std::mem::take(&mut self.instance_scratch);
         instances.clear();
-        if instances.capacity() < self.chunks.len() {
-            instances.reserve(self.chunks.len() - instances.capacity());
+        // A conservative upper bound for chunks that can intersect the
+        // axis-aligned detail box. Do not reserve for every chunk ever visited.
+        let horizontal_diameter =
+            usize::from(self.view_horizontal).saturating_mul(2).saturating_add(3);
+        let vertical_diameter =
+            usize::from(self.view_vertical).saturating_mul(2).saturating_add(3);
+        let active_capacity = horizontal_diameter
+            .saturating_mul(horizontal_diameter)
+            .saturating_mul(vertical_diameter)
+            .min(self.chunks.len());
+        if instances.capacity() < active_capacity {
+            instances.reserve(active_capacity.saturating_sub(instances.len()));
         }
+        let mut evicted = Vec::new();
         // A chunk whose centre is outside this radius cannot intersect any
         // cascade, so the three frustum tests below cannot be true for it.
         // The half-diagonal covers a chunk whose centre is just outside while
@@ -3220,6 +3241,7 @@ impl Renderer {
                 || centre.z.abs() > horizontal_reach
                 || centre.y.abs() > vertical_reach
             {
+                evicted.push(*pos);
                 continue;
             }
             let seen = frustum.contains_chunk(offset);
@@ -3280,6 +3302,13 @@ impl Renderer {
                 ],
                 corners,
             });
+        }
+        // Drop old GPU buffers and their per-chunk model data, not merely the
+        // draw call. The app remembers these positions and rebuilds them only
+        // if the player walks back into the granted detail radius.
+        for pos in evicted {
+            self.remove_chunk(&pos);
+            self.evicted.push(pos);
         }
         self.drawn = culled.visible.len();
         self.cast = culled.casters.iter().map(Vec::len).sum::<usize>();

@@ -555,6 +555,10 @@ struct TouchControls {
     look_id: Option<u64>,
     look_last: (f32, f32),
     jump_id: Option<u64>,
+    use_id: Option<u64>,
+    sprint_id: Option<u64>,
+    sneak_id: Option<u64>,
+    fly_id: Option<u64>,
     dig_id: Option<u64>,
     place_id: Option<u64>,
     inventory_id: Option<u64>,
@@ -563,6 +567,80 @@ struct TouchControls {
 impl TouchControls {
     fn clear(&mut self) {
         *self = Self::default();
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy)]
+struct TouchLayout {
+    joystick: (f32, f32),
+    jump: (f32, f32),
+    use_action: (f32, f32),
+    sprint: (f32, f32),
+    sneak: (f32, f32),
+    dig: (f32, f32),
+    place: (f32, f32),
+    inventory: (f32, f32),
+    menu: (f32, f32),
+    chat: (f32, f32),
+    fly: (f32, f32),
+    button_radius: f32,
+    button_scale: f32,
+    joystick_scale: f32,
+}
+
+#[cfg(target_os = "android")]
+fn touch_layout(width: f32, height: f32) -> TouchLayout {
+    const BUTTON_SCALE: f32 = 0.82;
+    const JOYSTICK_SCALE: f32 = 0.78;
+    let joystick = (
+        (88.0 * JOYSTICK_SCALE).min(width * 0.22),
+        height - 98.0 * JOYSTICK_SCALE,
+    );
+    let (jump, use_action, sprint, dig, place, sneak) = if height > width {
+        let right = width - 76.0 * BUTTON_SCALE;
+        let left = width - 164.0 * BUTTON_SCALE;
+        let top = height - 430.0 * BUTTON_SCALE;
+        let middle = height - 330.0 * BUTTON_SCALE;
+        let bottom = height - 230.0 * BUTTON_SCALE;
+        (
+            (right, top),
+            (left, top),
+            (right, middle),
+            (right, bottom),
+            (left, bottom),
+            (left, middle),
+        )
+    } else {
+        let right = width - 78.0 * BUTTON_SCALE;
+        let middle = width - 166.0 * BUTTON_SCALE;
+        let left = width - 254.0 * BUTTON_SCALE;
+        let top = height - 250.0 * BUTTON_SCALE;
+        let bottom = height - 160.0 * BUTTON_SCALE;
+        (
+            (right, top),
+            (middle, top),
+            (left, top),
+            (right, bottom),
+            (middle, bottom),
+            (left, bottom),
+        )
+    };
+    TouchLayout {
+        joystick,
+        jump,
+        use_action,
+        sprint,
+        sneak,
+        dig,
+        place,
+        inventory: (width - 154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
+        menu: (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
+        chat: (54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
+        fly: (154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE),
+        button_radius: 43.0 * BUTTON_SCALE,
+        button_scale: BUTTON_SCALE,
+        joystick_scale: JOYSTICK_SCALE,
     }
 }
 
@@ -2152,6 +2230,12 @@ fn release_touch_controls(
     if controls.jump_id.is_some() {
         held.up = false;
     }
+    if controls.sprint_id.is_some() {
+        held.sprint = false;
+    }
+    if controls.sneak_id.is_some() {
+        held.down = false;
+    }
     if controls.dig_id.is_some() {
         *digging = false;
         app.stop_digging();
@@ -2183,35 +2267,24 @@ fn process_touch_event(
     );
     let width = content.width();
     let height = content.height();
-    const BUTTON_SCALE: f32 = 0.90;
-    const JOYSTICK_SCALE: f32 = 0.85;
-    let joystick = ((88.0 * JOYSTICK_SCALE).min(width * 0.22), height - 98.0 * JOYSTICK_SCALE);
-    let jump = (width - 78.0 * BUTTON_SCALE, height - 164.0 * BUTTON_SCALE);
-    let dig = (width - 78.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
-    let place = (width - 166.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
-    let inventory = (width - 154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
-    let menu = (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
-    let button_radius = 43.0 * BUTTON_SCALE;
+    let layout = touch_layout(width, height);
 
-    // Touches must not continue moving the player behind a menu, chat box or
-    // server dialog. Android does not guarantee a release on focus changes.
     if app.menu_open() || app.chat_open() || !app.dialogs().is_empty() {
         release_touch_controls(controls, held, digging, app);
         return;
     }
 
-    // The hotbar uses a fixed-height virtual canvas. Match its enlarged Android
-    // presentation so each visible slot remains a reliable touch target.
+    // Match the hotbar's 72-pixel slots exactly, so its hitbox cannot steal
+    // taps intended for the action controls beside it.
     let hud_scale = height / f32::from(tiamat_core::hud::VIRTUAL_HEIGHT);
-    let hotbar_scale = 1.55 / 1.4;
     if matches!(&touch.phase, TouchPhase::Started) && hud_scale > 0.0 {
         let virtual_x = (position.0 - width * 0.5) / hud_scale;
         let from_bottom = (height - position.1) / hud_scale;
-        let slot_size = 72.0 * hotbar_scale;
-        let slot_pitch = 78.0 * hotbar_scale;
-        let hotbar_width = 9.0 * slot_pitch - 6.0 * hotbar_scale;
+        let slot_size = 72.0;
+        let slot_pitch = 78.0;
+        let hotbar_width = 9.0 * slot_pitch - 6.0;
         let relative_x = virtual_x + hotbar_width * 0.5;
-        if (24.0 * hotbar_scale..=96.0 * hotbar_scale).contains(&from_bottom)
+        if (24.0..=96.0).contains(&from_bottom)
             && relative_x >= 0.0
             && relative_x < hotbar_width
         {
@@ -2231,33 +2304,57 @@ fn process_touch_event(
 
     match touch.phase {
         TouchPhase::Started => {
-            // The official UI mod owns the inventory action and dialog.
-            if near(inventory, button_radius) {
+            if near(layout.inventory, layout.button_radius) {
                 controls.inventory_id = Some(touch.id);
                 app.send_action("tiamat_default_ui:inventory", true);
                 return;
             }
-            // A menu target keeps pause/settings reachable without a keyboard.
-            if near(menu, button_radius) {
+            if near(layout.menu, layout.button_radius) {
                 app.set_menu_open(true);
                 release_touch_controls(controls, held, digging, app);
                 return;
             }
-            if controls.jump_id.is_none() && near(jump, button_radius) {
+            if near(layout.chat, layout.button_radius) {
+                app.set_chat_open(true);
+                release_touch_controls(controls, held, digging, app);
+                return;
+            }
+            if app.may_fly() && near(layout.fly, layout.button_radius) {
+                controls.fly_id = Some(touch.id);
+                app.toggle_fly();
+                return;
+            }
+            if controls.jump_id.is_none() && near(layout.jump, layout.button_radius) {
                 controls.jump_id = Some(touch.id);
                 held.up = true;
-            } else if controls.dig_id.is_none() && near(dig, button_radius) {
+            } else if controls.use_id.is_none()
+                && near(layout.use_action, layout.button_radius)
+            {
+                controls.use_id = Some(touch.id);
+                app.interact();
+            } else if app.may_sprint()
+                && controls.sprint_id.is_none()
+                && near(layout.sprint, layout.button_radius)
+            {
+                controls.sprint_id = Some(touch.id);
+                held.sprint = true;
+            } else if controls.dig_id.is_none() && near(layout.dig, layout.button_radius) {
                 controls.dig_id = Some(touch.id);
                 *digging = true;
-            } else if controls.place_id.is_none() && near(place, button_radius) {
+            } else if controls.place_id.is_none() && near(layout.place, layout.button_radius) {
                 controls.place_id = Some(touch.id);
                 app.place();
+            } else if controls.sneak_id.is_none()
+                && near(layout.sneak, layout.button_radius)
+            {
+                controls.sneak_id = Some(touch.id);
+                held.down = true;
             } else if controls.joystick_id.is_none()
                 && position.0 < width * 0.42
                 && position.1 > height * 0.48
             {
                 controls.joystick_id = Some(touch.id);
-                update_touch_joystick(controls, held, position, joystick);
+                update_touch_joystick(controls, held, position, layout.joystick);
             } else if controls.look_id.is_none() && position.0 >= width * 0.42 {
                 controls.look_id = Some(touch.id);
                 controls.look_last = position;
@@ -2265,7 +2362,7 @@ fn process_touch_event(
         }
         TouchPhase::Moved => {
             if controls.joystick_id == Some(touch.id) {
-                update_touch_joystick(controls, held, position, joystick);
+                update_touch_joystick(controls, held, position, layout.joystick);
             } else if controls.look_id == Some(touch.id) {
                 held.look.0 += position.0 - controls.look_last.0;
                 held.look.1 += position.1 - controls.look_last.1;
@@ -2276,6 +2373,20 @@ fn process_touch_event(
             if controls.jump_id == Some(touch.id) {
                 controls.jump_id = None;
                 held.up = false;
+            }
+            if controls.use_id == Some(touch.id) {
+                controls.use_id = None;
+            }
+            if controls.sprint_id == Some(touch.id) {
+                controls.sprint_id = None;
+                held.sprint = false;
+            }
+            if controls.sneak_id == Some(touch.id) {
+                controls.sneak_id = None;
+                held.down = false;
+            }
+            if controls.fly_id == Some(touch.id) {
+                controls.fly_id = None;
             }
             if controls.dig_id == Some(touch.id) {
                 controls.dig_id = None;
@@ -2315,7 +2426,7 @@ fn update_touch_joystick(
 ) {
     let dx = position.0 - centre.0;
     let dy = position.1 - centre.1;
-    let radius = 64.0 * 0.85;
+    let radius = 64.0 * 0.78;
     let distance = (dx * dx + dy * dy).sqrt();
     let factor = if distance > radius {
         radius / distance
@@ -2323,7 +2434,7 @@ fn update_touch_joystick(
         1.0
     };
     controls.joystick_offset = (dx * factor, dy * factor);
-    let dead_zone = 13.0 * 0.85;
+    let dead_zone = 13.0 * 0.78;
     held.left = dx < -dead_zone;
     held.right = dx > dead_zone;
     held.forward = dy < -dead_zone;
@@ -2332,21 +2443,16 @@ fn update_touch_joystick(
 
 /// Draws the mobile controls in points, matching the hit regions used above.
 #[cfg(target_os = "android")]
-fn draw_touch_controls(context: &egui::Context, content: egui::Rect, controls: TouchControls) {
+fn draw_touch_controls(
+    context: &egui::Context,
+    content: egui::Rect,
+    controls: TouchControls,
+    may_sprint: bool,
+    may_fly: bool,
+    flying: bool,
+) {
     let origin = content.min;
-    let width = content.width();
-    let height = content.height();
-    const BUTTON_SCALE: f32 = 0.90;
-    const JOYSTICK_SCALE: f32 = 0.85;
-    let joystick = egui::pos2(
-        origin.x + (88.0 * JOYSTICK_SCALE).min(width * 0.22),
-        origin.y + height - 98.0 * JOYSTICK_SCALE,
-    );
-    let jump = (width - 78.0 * BUTTON_SCALE, height - 164.0 * BUTTON_SCALE);
-    let dig = (width - 78.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
-    let place = (width - 166.0 * BUTTON_SCALE, height - 76.0 * BUTTON_SCALE);
-    let inventory = (width - 154.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
-    let menu = (width - 54.0 * BUTTON_SCALE, 48.0 * BUTTON_SCALE);
+    let layout = touch_layout(content.width(), content.height());
     let painter = context.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("android-touch-controls"),
@@ -2355,37 +2461,66 @@ fn draw_touch_controls(context: &egui::Context, content: egui::Rect, controls: T
     let edge = egui::Color32::from_white_alpha(145);
     let active = egui::Color32::from_rgba_unmultiplied(74, 125, 190, 190);
 
-    let base = joystick;
-    painter.circle_filled(base, 66.0 * JOYSTICK_SCALE, faint);
-    painter.circle_stroke(base, 66.0 * JOYSTICK_SCALE, egui::Stroke::new(2.0 * JOYSTICK_SCALE, edge));
+    let joystick = egui::pos2(
+        origin.x + layout.joystick.0,
+        origin.y + layout.joystick.1,
+    );
+    painter.circle_filled(joystick, 66.0 * layout.joystick_scale, faint);
+    painter.circle_stroke(
+        joystick,
+        66.0 * layout.joystick_scale,
+        egui::Stroke::new(2.0 * layout.joystick_scale, edge),
+    );
     let knob = egui::pos2(
         joystick.x + controls.joystick_offset.0,
         joystick.y + controls.joystick_offset.1,
     );
     painter.circle_filled(
         knob,
-        27.0 * JOYSTICK_SCALE,
+        27.0 * layout.joystick_scale,
         if controls.joystick_id.is_some() { active } else { faint },
     );
-    painter.circle_stroke(knob, 27.0 * JOYSTICK_SCALE, egui::Stroke::new(2.0 * JOYSTICK_SCALE, edge));
+    painter.circle_stroke(
+        knob,
+        27.0 * layout.joystick_scale,
+        egui::Stroke::new(2.0 * layout.joystick_scale, edge),
+    );
 
     let button = |point: (f32, f32), label: &str, pressed: bool| {
         let centre = egui::pos2(origin.x + point.0, origin.y + point.1);
-        painter.circle_filled(centre, 36.0 * BUTTON_SCALE, if pressed { active } else { faint });
-        painter.circle_stroke(centre, 36.0 * BUTTON_SCALE, egui::Stroke::new(2.0 * BUTTON_SCALE, edge));
+        painter.circle_filled(
+            centre,
+            36.0 * layout.button_scale,
+            if pressed { active } else { faint },
+        );
+        painter.circle_stroke(
+            centre,
+            36.0 * layout.button_scale,
+            egui::Stroke::new(2.0 * layout.button_scale, edge),
+        );
         painter.text(
             centre,
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(15.0 * BUTTON_SCALE),
+            egui::FontId::proportional(15.0 * layout.button_scale),
             egui::Color32::WHITE,
         );
     };
-    button(jump, "JUMP", controls.jump_id.is_some());
-    button(dig, "DIG", controls.dig_id.is_some());
-    button(place, "PLACE", controls.place_id.is_some());
-    button(inventory, "INV", controls.inventory_id.is_some());
-    button(menu, "MENU", false);
+
+    button(layout.jump, "JUMP", controls.jump_id.is_some());
+    button(layout.use_action, "USE", controls.use_id.is_some());
+    if may_sprint {
+        button(layout.sprint, "SPRINT", controls.sprint_id.is_some());
+    }
+    button(layout.dig, "DIG", controls.dig_id.is_some());
+    button(layout.place, "PLACE", controls.place_id.is_some());
+    button(layout.sneak, "SNEAK", controls.sneak_id.is_some());
+    button(layout.inventory, "INV", controls.inventory_id.is_some());
+    button(layout.menu, "MENU", false);
+    button(layout.chat, "CHAT", false);
+    if may_fly {
+        button(layout.fly, "FLY", flying || controls.fly_id.is_some());
+    }
 }
 
 /// Milliseconds since an instant, for one phase of a frame.
@@ -2450,17 +2585,35 @@ fn draw_sound_attribution(app: &App, ui: &mut egui::Ui) {
 /// you are going is a pause, and one that says nothing is a hang. The name came
 /// from the server and is a display string like any other — drawn, never
 /// trusted (charter rule 14).
-fn draw_entering(ctx: &egui::Context, domain: &str) {
+fn draw_loading_overlay(ctx: &egui::Context, title: &str, subtitle: &str) {
     let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new("tiamat.entering"))
-        .fixed_pos(screen.center() - egui::vec2(0.0, 24.0))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Entering");
-                ui.label(domain);
-            });
-        });
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("tiamat.loading-overlay"),
+    ));
+    painter.rect_filled(
+        screen,
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgba_unmultiplied(7, 10, 16, 245),
+    );
+    painter.text(
+        screen.center() - egui::vec2(0.0, 12.0),
+        egui::Align2::CENTER_BOTTOM,
+        title,
+        egui::FontId::proportional(28.0),
+        egui::Color32::WHITE,
+    );
+    painter.text(
+        screen.center() + egui::vec2(0.0, 12.0),
+        egui::Align2::CENTER_TOP,
+        subtitle,
+        egui::FontId::proportional(16.0),
+        egui::Color32::LIGHT_GRAY,
+    );
+}
+
+fn draw_entering(ctx: &egui::Context, domain: &str) {
+    draw_loading_overlay(ctx, "Loading world", domain);
 }
 
 /// A script draws on a canvas [`tiamat_core::hud::VIRTUAL_HEIGHT`] tall and as
@@ -3183,16 +3336,9 @@ fn register_atlas(surface: &mut Surface) {
     ));
 }
 
-/// A modest Android-only zoom boost for phone and tablet viewing distances.
+/// Applies the configured interface scale without a hidden platform multiplier.
 fn interface_zoom_factor(configured: f32) -> f32 {
-    #[cfg(target_os = "android")]
-    {
-        configured * 1.55
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        configured
-    }
+    configured
 }
 
 /// A world's name and its settings answers, as changed on the Mods tab.
@@ -3236,16 +3382,11 @@ fn draw_front(
             let context = root.ctx().clone();
             action = front.draw(&context, config, client::app::HUD_FONT);
             if matches!(&action, client::front::Action::Create { .. }) {
-                egui::Window::new("Creating world")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(&context, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Preparing world…");
-                        });
-                    });
+                draw_loading_overlay(
+                    &context,
+                    "Creating world",
+                    "Preparing world and loading its starting assets…",
+                );
             }
             dirty = front.take_settings_dirty();
             if front.take_catalogue_dirty() {
@@ -3413,7 +3554,14 @@ fn draw_hud(
         );
         #[cfg(target_os = "android")]
         if touch_controls_visible {
-            draw_touch_controls(&context, content, touch_controls);
+            draw_touch_controls(
+                &context,
+                content,
+                touch_controls,
+                app.may_sprint(),
+                app.may_fly(),
+                app.flying(),
+            );
         }
         egui::Area::new(egui::Id::new("hud"))
             .fixed_pos(egui::pos2(8.0, 8.0))

@@ -617,38 +617,38 @@ impl Front {
             }
         }
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            if crate::widget::button(ui, self.worn.button, "Play").clicked()
-                && let Some(index) = self.selected
-                && let Some(entry) = self.library.entries.get(index).cloned()
-            {
-                action = match Library::mismatch(&entry, &self.catalogue.enabled()) {
-                    Some(difference) => {
-                        self.confirming = Some((index, difference));
-                        Action::None
-                    }
-                    None => Action::Open(entry),
-                };
-            }
-            if crate::widget::button(ui, self.worn.button, "Forget").clicked() {
-                action = self.forget_selected();
-            }
-            // **Only for a world this machine runs.** Joining somebody else's
-            // server is not hosting one, and a tick box that did nothing on
-            // half the list would be a control that lies.
-            let local = self
-                .selected
-                .and_then(|index| self.library.entries.get(index))
-                .is_some_and(Entry::is_local);
-            ui.add_enabled_ui(local, |ui| {
-                ui.checkbox(&mut self.host_on_lan, "Open to LAN")
-                    .on_hover_text(
-                        "Others on your network can join by typing this machine's address. \
-                         Off means the world is reachable only from this computer.",
-                    );
+        if self.selected.is_some_and(|index| index < self.library.entries.len()) {
+            ui.separator();
+            ui.horizontal(|ui| {
+                if crate::widget::button(ui, self.worn.button, "Play").clicked()
+                    && let Some(index) = self.selected
+                    && let Some(entry) = self.library.entries.get(index).cloned()
+                {
+                    action = match Library::mismatch(&entry, &self.catalogue.enabled()) {
+                        Some(difference) => {
+                            self.confirming = Some((index, difference));
+                            Action::None
+                        }
+                        None => Action::Open(entry),
+                    };
+                }
+                if crate::widget::button(ui, self.worn.button, "Forget").clicked() {
+                    action = self.forget_selected();
+                }
+                // Only a local world can be opened to LAN.
+                let local = self
+                    .selected
+                    .and_then(|index| self.library.entries.get(index))
+                    .is_some_and(Entry::is_local);
+                ui.add_enabled_ui(local, |ui| {
+                    ui.checkbox(&mut self.host_on_lan, "Open to LAN")
+                        .on_hover_text(
+                            "Others on your network can join by typing this machine's address. \\
+                             Off means the world is reachable only from this computer.",
+                        );
+                });
             });
-        });
+        }
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {

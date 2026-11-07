@@ -1048,14 +1048,12 @@ pub struct App {
     chat: crate::chat::ChatLog,
     /// How many materials the atlas holds a texture for.
     textured: usize,
-    /// The space being entered, while its world is still arriving.
-    ///
-    /// **A domain switch throws everything away**, so for a moment the player
-    /// is standing in nothing — and nothing looks exactly like a server that
-    /// has stopped answering. This is what says otherwise. Cleared when the
-    /// first chunk of the new space arrives, because that is the moment there
-    /// is something to look at rather than a moment chosen by a timer.
+    /// The space being entered, until its first terrain and material atlas are ready.
     entering: Option<String>,
+    /// Whether the latest material atlas has finished packing on the worker.
+    atlas_ready: bool,
+    /// Whether any terrain or horizon summary has arrived for the current space.
+    world_content_arrived: bool,
     /// What each inventory view holds, as the server last said.
     ///
     /// The server's answer, not the client's belief: a slot moves when the
@@ -1353,6 +1351,9 @@ pub struct App {
     /// nothing — the frame has one budget however many jobs share it.
     /// The mesh workers, and which chunks are on them (milestone 0.5.0, P2).
     mesh_pool: crate::meshwork::MeshPool,
+    /// Chunks whose GPU mesh was evicted outside the current detail radius.
+    /// Their CPU data remains in the store and is remeshed only when they return.
+    evicted_meshes: std::collections::BTreeSet<ChunkPos>,
     /// Chunks with a job on the workers, by the generation it was taken at.
     in_flight: BTreeMap<ChunkPos, u64>,
     /// The locally predicted body, once the world has been joined.
@@ -1524,6 +1525,8 @@ impl App {
             chat: crate::chat::ChatLog::default(),
             textured: 0,
             entering: None,
+            atlas_ready: false,
+            world_content_arrived: false,
             dialog_events: Vec::new(),
             hover_lines: std::collections::BTreeMap::new(),
             mixer,
@@ -1542,6 +1545,7 @@ impl App {
             fonts: crate::fonts::Fonts::new(),
             mesh_pool: crate::meshwork::MeshPool::new(crate::meshwork::MeshPool::default_workers()),
             in_flight: BTreeMap::new(),
+            evicted_meshes: std::collections::BTreeSet::new(),
             may_fly: false,
             abilities: tiamat_core::phys::Abilities::DEFAULT,
             own_look: None,
@@ -2629,12 +2633,18 @@ impl App {
     ///
     /// Anything else the server may still refuse — it owns that decision — and
     /// says why, which arrives as a warning.
+    pub fn interact(&mut self) {
+        self.swing();
+        self.connection.send(Command::Use {
+            target: self.dig_target(),
+        });
+    }
+
     pub fn place(&mut self) {
         // **Which STACK, not merely which material.** A player placing a stair
         // must spend the stairs they crafted rather than the loose rubble
         // beside them, so the cut goes with the request and the server matches
         // the pair.
-        self.swing();
         let stack = self.hotbar.get(self.selected).cloned().flatten();
         // An item is not a block (see `App::items`), so holding one is having
         // nothing to place, the same as an empty hand.
@@ -2643,14 +2653,11 @@ impl App {
             .filter(|stack| !self.icon_art.items.contains(&stack.material));
         let Some(stack) = placeable.cloned() else {
             // Aimed at a block or at nothing, the server hears it either way:
-            // it is the one that knows which mods want a use without a cell,
-            // and the warning this used to show here is what it answers when
-            // none does.
-            self.connection.send(Command::Use {
-                target: self.dig_target(),
-            });
+            // it is the one that knows which mods want a use without a cell.
+            self.interact();
             return;
         };
+        self.swing();
         let Some((target, face)) = self.place_aim() else {
             return;
         };
@@ -3913,6 +3920,7 @@ impl App {
         images: BTreeMap<u16, Image>,
     ) {
         self.adopt_materials(&table);
+        self.atlas_ready = false;
         // The tints are a small table and do not need the atlas: writing them
         // now means the atlas install later only has to swap the texture.
         self.renderer.set_tints(&table);
@@ -3933,6 +3941,10 @@ impl App {
             return;
         };
         self.atlas_build = None;
+        self.atlas_ready = true;
+        if self.world_content_arrived {
+            self.entering = None;
+        }
         // **Set here, and it was not.** The field existed, the accessor existed
         // and the overlay drew it, and nothing ever wrote it — so the line read
         // "0 textured" on a working atlas as readily as on a broken one, and
@@ -4205,6 +4217,22 @@ impl App {
         (self.granted_view.horizontal, self.granted_view.vertical)
     }
 
+    /// The same axis-aligned detail bound used by the renderer, in store coordinates.
+    fn within_render_distance(&self, pos: ChunkPos) -> bool {
+        let offset = self.camera.position.chunk_offset(self.drawn_at(pos));
+        let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+        let half_diagonal = tiamat_core::CHUNK_BLOCKS as f32 * 0.866_025_4;
+        let horizontal =
+            f32::from(self.granted_view.horizontal) * tiamat_core::CHUNK_BLOCKS as f32
+                + half_diagonal;
+        let vertical =
+            f32::from(self.granted_view.vertical) * tiamat_core::CHUNK_BLOCKS as f32
+                + half_diagonal;
+        centre.x.abs() <= horizontal
+            && centre.z.abs() <= horizontal
+            && centre.y.abs() <= vertical
+    }
+
     /// Whether the HUD is drawn.
     #[must_use]
     pub const fn hud_visible(&self) -> bool {
@@ -4218,6 +4246,8 @@ impl App {
     /// dispatch table, and it was thirty of the table's hundred lines.
     fn enter_domain(&mut self, domain: &str) {
         self.entering = Some(domain.to_owned());
+        self.world_content_arrived = false;
+        self.evicted_meshes.clear();
         // **The prediction goes with the chunks.** Left alone it
         // keeps the footing it had in the space being left, and
         // walks on the spot against an empty store — audibly, since
@@ -4978,10 +5008,11 @@ impl App {
     /// line ceiling, and because the horizon clearing the loading screen is a
     /// claim worth stating once rather than a line in a list.
     fn adopt_summary(&mut self, pos: tiamat_core::ChunkPos, summary: tiamat_core::lod::Summary) {
-        // The horizon counts as terrain arriving: a player who switched domains
-        // and is looking at a mountain range a mile off is not waiting any more.
-        self.entering = None;
         self.store.set_summary(pos, summary);
+        self.world_content_arrived = true;
+        if self.atlas_ready {
+            self.entering = None;
+        }
     }
 
     /// Drains everything the network has produced since the last frame.
@@ -5074,6 +5105,7 @@ impl App {
 
             Event::ChunkUnload(pos) => {
                 self.horizon.beyond.remove(&pos);
+                self.evicted_meshes.remove(&pos);
                 if self.store.remove(pos) {
                     // The mesh has to go with the data. A renderer holding
                     // a mesh for a chunk the store has forgotten draws a
@@ -5181,9 +5213,31 @@ impl App {
         let mut meshing = std::time::Duration::ZERO;
         let mut rebuilt = 0;
 
-        // **What the workers finished.** A result for a chunk the store has
-        // marked since, or no longer holds, is dropped: the chunk is dirty
-        // again and a fresh job follows, or it is gone.
+        // GPU meshes outside the detail radius are evicted by the renderer.
+        // Keep their CPU chunks, but only rebuild them after they re-enter view.
+        for drawn in self.renderer.take_evicted_chunks() {
+            let pos = ChunkPos::new(
+                drawn.x - self.displacement[0],
+                drawn.y - self.displacement[1],
+                drawn.z - self.displacement[2],
+            );
+            self.evicted_meshes.insert(pos);
+        }
+        let ready_again: Vec<_> = self
+            .evicted_meshes
+            .iter()
+            .copied()
+            .filter(|pos| self.store.get(*pos).is_none() || self.within_render_distance(*pos))
+            .collect();
+        for pos in ready_again {
+            self.evicted_meshes.remove(&pos);
+            if self.store.get(pos).is_some() {
+                self.store.mark_dirty(pos);
+            }
+        }
+
+        // Discard stale, unloaded, or now-distant worker results. Distant
+        // chunks are rebuilt only if the player returns to their area.
         for done in self.mesh_pool.drain() {
             if self.in_flight.get(&done.pos) == Some(&done.generation) {
                 self.in_flight.remove(&done.pos);
@@ -5191,6 +5245,10 @@ impl App {
             if self.store.generation(done.pos) != done.generation
                 || self.store.get(done.pos).is_none()
             {
+                continue;
+            }
+            if !self.within_render_distance(done.pos) {
+                self.evicted_meshes.insert(done.pos);
                 continue;
             }
             self.upload_chunk(done.pos, done.mesh);
@@ -5201,23 +5259,32 @@ impl App {
         // makes "nearest first" order the queue from 50,000 blocks away.
         let centre = self.camera_chunk();
         let due = self.store.take_dirty(centre, MESH_SUBMISSIONS_PER_FRAME);
-        if due.positions.is_empty() {
+        let mut positions = Vec::with_capacity(due.positions.len());
+        let mut urgent = 0;
+        let mut deferred = Vec::new();
+        for (index, pos) in due.positions.iter().copied().enumerate() {
+            if self.within_render_distance(pos) {
+                if index < due.urgent {
+                    urgent += 1;
+                }
+                positions.push(pos);
+            } else {
+                deferred.push(pos);
+            }
+        }
+        self.store.requeue(&deferred);
+        if positions.is_empty() {
             self.pacing
                 .remesh(started.elapsed().as_secs_f32() * 1000.0, 0.0, rebuilt);
             return rebuilt;
         }
-        // **Every mode meshes against the real light, mode 1 included.** A
-        // constant would merge faces across every shadow edge and leave the
-        // mode unable to tell a cave from a field. See `LightingMode::Simple`.
+        // Every mode meshes against the real light, mode 1 included.
         let flat = !self.config.lighting_mode.uses_propagated_light();
 
-        for (index, pos) in due.positions.iter().enumerate() {
-            if index < due.urgent {
-                // **An urgent chunk is finished here, whatever it costs.**
-                // Those are what one frame's edits touched, and a chunk drawn
-                // without the neighbour whose face its edit exposed is a hole
-                // through the world. A worker would show that hole for the
-                // frame or two the job took.
+        for (index, pos) in positions.iter().enumerate() {
+            if index < urgent {
+                // An urgent chunk is finished here, whatever it costs: the
+                // edit and the faces it exposed must agree in this frame.
                 let mesh_started = std::time::Instant::now();
                 let mesh = {
                     let Some(chunk) = self.store.get(*pos) else {
@@ -5239,17 +5306,15 @@ impl App {
                     }
                 };
                 meshing += mesh_started.elapsed();
-                // Whatever a worker still owes this chunk is older than this.
                 self.in_flight.remove(pos);
                 self.upload_chunk(*pos, mesh);
                 rebuilt += 1;
                 continue;
             }
-            // **Streaming chunks go to the workers**, nearest first, as many
-            // as the pool can take up before the camera moves on; the rest
-            // wait in the dirty set where the next frame orders them again.
+            // Streaming chunks go to workers, nearest first. Distant chunks
+            // stay dirty without consuming CPU or GPU time.
             if self.mesh_pool.backlog() >= self.mesh_pool.capacity() {
-                self.store.requeue(&due.positions[index..]);
+                self.store.requeue(&positions[index..]);
                 break;
             }
             let generation = self.store.generation(*pos);
@@ -5264,11 +5329,8 @@ impl App {
                 flat,
                 sight: std::sync::Arc::clone(&self.transparent),
             });
-            // Time is the thing being protected, so time is what this spends:
-            // a frame that has given the mesher its share stops here and the
-            // rest go back in order.
-            if started.elapsed() >= REMESH_TIME_BUDGET && index + 1 < due.positions.len() {
-                self.store.requeue(&due.positions[index + 1..]);
+            if started.elapsed() >= REMESH_TIME_BUDGET && index + 1 < positions.len() {
+                self.store.requeue(&positions[index + 1..]);
                 break;
             }
         }
@@ -6054,10 +6116,12 @@ impl App {
         tint: [u8; 3],
         fog: Option<tiamat_core::proto::ChunkFog>,
     ) {
-        // The new space has started arriving, so there is something to look at.
-        // Cleared here rather than on a timer: what the player is waiting for is
-        // terrain, and this is it.
-        self.entering = None;
+        // Keep the loading screen until both terrain and the material atlas are
+        // ready, so the first visible inventory icons are never placeholders.
+        self.world_content_arrived = true;
+        if self.atlas_ready {
+            self.entering = None;
+        }
         // The colour before the blocks: the two arrived in one message
         // precisely so there is no frame in which the terrain is on screen
         // wearing the wrong one.
@@ -6380,6 +6444,12 @@ impl App {
     /// because joining is a thing worth naming rather than the longest arm of a
     /// match.
     fn joined_world(&mut self, spawn: tiamat_core::BlockPos, tick: u64, may_fly: bool, seed: u64) {
+        if self.entering.is_none() {
+            self.entering = Some("world".to_owned());
+        }
+        if self.world_content_arrived && self.atlas_ready {
+            self.entering = None;
+        }
         self.seed = Some(seed);
         // The star catalog is the seed's, derived here exactly as the server
         // derives it, so the star a mod names is the star on screen.
@@ -6520,6 +6590,12 @@ impl App {
     #[must_use]
     pub const fn abilities(&self) -> tiamat_core::phys::Abilities {
         self.abilities
+    }
+
+    /// Whether the server currently allows this player to sprint.
+    #[must_use]
+    pub const fn may_sprint(&self) -> bool {
+        self.abilities.sprint
     }
 
     /// Records which server this is, and says so if it was never seen before.

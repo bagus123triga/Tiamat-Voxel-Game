@@ -476,9 +476,7 @@ pub struct Config {
     /// [`tiamat_core::hud::VIRTUAL_HEIGHT`] tall — this scales the canvas, not
     /// the contract.
     ///
-    /// Bounded by [`UI_SCALE_RANGE`]. Default `1.25` rather than `1.0`: the dialogs were reported from the
-    /// window as too small, and a default nobody has to find is worth more than
-    /// a setting everybody has to change.
+    /// Bounded by [`UI_SCALE_RANGE`]. Default `1.0`, with no hidden Android-only multiplier.
     #[serde(default = "Config::default_ui_scale")]
     pub ui_scale: f32,
 
@@ -562,7 +560,7 @@ impl Config {
     }
 
     const fn default_ui_scale() -> f32 {
-        1.25
+        1.0
     }
 
     const fn default_hud_visible() -> bool {

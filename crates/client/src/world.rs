@@ -1072,6 +1072,19 @@ impl ChunkStore {
         self.dirty.extend(positions.iter().copied());
     }
 
+    /// Marks one held chunk for a background remesh, invalidating any older job.
+    ///
+    /// Unlike an edit mark this is not urgent: an evicted mesh can be rebuilt
+    /// by the worker without forcing a full mesh build onto the frame thread.
+    pub fn mark_dirty(&mut self, pos: ChunkPos) {
+        if !self.chunks.contains_key(&pos) {
+            return;
+        }
+        *self.generation.entry(pos).or_insert(self.generation_floor) += 1;
+        self.urgent.remove(&pos);
+        self.dirty.insert(pos);
+    }
+
     /// Marks every held chunk for remeshing.
     ///
     /// For a render-mode change, where nothing about the world moved but every
@@ -2150,4 +2163,19 @@ mod tests {
         store.requeue_stale(&[ChunkPos::new(0, 0, 0)]);
         assert_eq!(store.take_stale(16).len(), 1);
     }
+    #[test]
+    fn evicted_mesh_can_be_marked_for_background_remesh() {
+        let pos = ChunkPos::new(1, 2, 3);
+        let mut store = ChunkStore::new();
+        store.insert(chunk_at(1, 2, 3));
+        let generation = store.generation(pos);
+
+        store.mark_dirty(pos);
+
+        assert_eq!(store.generation(pos), generation + 1);
+        let due = store.take_dirty(pos, 1);
+        assert_eq!(due.urgent, 0);
+        assert_eq!(due.positions, vec![pos]);
+    }
+
 }
