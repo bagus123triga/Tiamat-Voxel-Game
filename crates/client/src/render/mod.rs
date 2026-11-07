@@ -2501,6 +2501,12 @@ impl Renderer {
         self.set_chunk(pos, mesh);
     }
 
+    /// Keeps a resident horizon mesh as a temporary fallback while its full chunk is meshed.
+    pub fn promote_horizon_to_detail(&mut self, pos: ChunkPos) {
+        self.horizon_chunks.remove(&pos);
+        self.detail_chunks.insert(pos);
+    }
+
     /// Stores a downsampled horizon chunk, managed against fog reach instead.
     pub fn set_horizon_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
         self.detail_chunks.remove(&pos);

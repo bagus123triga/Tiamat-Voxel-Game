@@ -6171,6 +6171,9 @@ impl App {
         let pos = chunk.pos();
         self.horizon.built.remove(&pos);
         self.horizon.beyond.remove(&pos);
+        // Keep the old low-detail mesh as a fallback until the full mesh is
+        // ready, but subject it to the detail radius if the player walks away.
+        self.renderer.promote_horizon_to_detail(self.drawn_at(pos));
         self.store.set_tint(pos, tint);
         self.renderer.set_chunk_tint(pos, tint);
         // The place's fog, by the same rule: the latest chunk of a column speaks
